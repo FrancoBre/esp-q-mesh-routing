@@ -207,19 +207,16 @@ for episode in tqdm(range(n_episodes)):
         obs = next_action
         agent.decay_epsilon()
 
-# rolling_length = .05
-rolling_length = 1
+rolling_length = 1  # Tamaño de la ventana para la media móvil
+
 fig, axs = plt.subplots(ncols=3, figsize=(12, 5))
 
+# Calcular medias móviles para las métricas de rendimiento
+
 # Episode Rewards
-# reward_moving_average = (
-#     np.convolve(
-#         np.array(env.return_queue).flatten(), np.ones(rolling_length), mode="valid"
-# )
-#     ) / rolling_length
 reward_moving_average = (
     np.convolve(
-        np.array(env.length_queue).flatten(), np.ones(rolling_length), mode="valid"
+        np.array(env.return_queue).flatten(), np.ones(rolling_length), mode="valid"
     ) / rolling_length
 )
 

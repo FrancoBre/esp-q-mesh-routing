@@ -1,59 +1,72 @@
-import gymnasium as gym
-from gymnasium import spaces
+import gym
+import matplotlib.pyplot as plt
+import networkx as nx
 import numpy as np
 
 class MeshRoutingEnv(gym.Env):
-    def __init__(self, initial_node, neighbors_dict):
+    def __init__(self, initial_node, neighbors_dict, goal_node):
         super(MeshRoutingEnv, self).__init__()
         
         self.initial_node = initial_node
         self.current_node = initial_node
         self.neighbors_dict = neighbors_dict
+        self.goal_node = goal_node
         
-        self.action_space = spaces.Discrete(len(neighbors_dict[initial_node]))  # número de vecinos del nodo inicial
-        self.observation_space = spaces.Dict({
-            'current_node': spaces.Discrete(len(neighbors_dict)),
-            'neighbors': spaces.MultiDiscrete([len(neighbors_dict) for _ in range(len(neighbors_dict[initial_node]))])
-        })
-        
-    def reset(self):
+        self.observation_space = gym.spaces.Discrete(len(neighbors_dict))
+        self.action_space = gym.spaces.Discrete(len(neighbors_dict))  # Será actualizado dinámicamente
+
+        self.route = [self.current_node]  # Para almacenar el ruteo actual
+
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
         self.current_node = self.initial_node
-        return self._get_observation()
+        self.route = [self.current_node]
+        return self._get_observation(), {}
         
     def _get_observation(self):
-        neighbors = self.neighbors_dict[self.current_node]
-        return {'current_node': self.current_node, 'neighbors': np.array(neighbors)}
+        self.action_space = gym.spaces.Discrete(len(self.neighbors_dict[self.current_node]))
+        return self.current_node
     
     def step(self, action):
         neighbors = self.neighbors_dict[self.current_node]
-        if action < 0 or action >= len(neighbors):
-            raise ValueError(f"Invalid action: {action}")
-        
         self.current_node = neighbors[action]
+        self.route.append(self.current_node)
         
         observation = self._get_observation()
-        reward = -1  # Penalty for each step
-        done = self.current_node == self.goal_node  # Define tu condición de finalización
+        reward = -1 if self.current_node != self.goal_node else 100
+        terminated = self.current_node == self.goal_node or len(self.neighbors_dict[self.current_node]) == 0
+        truncated = False
         info = {}
         
-        return observation, reward, done, info
+        return observation, reward, terminated, truncated, info
     
     def render(self, mode='human'):
-        pass  # Opcional, para visualizar el entorno
+        G = nx.Graph()
 
-# Ejemplo de uso
-initial_node = 0
-neighbors_dict = {
-    0: [1, 2],
-    1: [0, 3],
-    2: [0, 3],
-    3: [1, 2]
-}
+        for node, neighbors in self.neighbors_dict.items():
+            for neighbor in neighbors:
+                G.add_edge(node, neighbor)
 
-env = MeshRoutingEnv(initial_node, neighbors_dict)
-obs = env.reset()
-print(obs)
+        pos = nx.spring_layout(G)
+        plt.clf()  # Clear the current figure
 
-action = 0  # Por ejemplo, mover al primer vecino
-obs, reward, done, info = env.step(action)
-print(obs, reward, done, info)
+        nx.draw(G, pos, with_labels=True, node_size=500, node_color="skyblue", font_weight='bold', edge_color='gray')
+
+        route_edges = [(self.route[i], self.route[i+1]) for i in range(len(self.route)-1)]
+        nx.draw_networkx_edges(G, pos, edgelist=route_edges, width=2, edge_color='r')
+
+        if len(self.route) > 1:
+            start_node = self.route[-2]
+            end_node = self.route[-1]
+            start_pos = pos[start_node]
+            end_pos = pos[end_node]
+
+            plt.annotate(
+                '', 
+                xy=end_pos, 
+                xytext=start_pos,
+                arrowprops=dict(facecolor='blue', shrink=0.05)
+            )
+
+        plt.title("Network Routing Visualization")
+        plt.pause(0.01)  # Pause to update the plot
