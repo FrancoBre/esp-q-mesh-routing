@@ -15,6 +15,7 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 import seaborn as sns
+import time
 
 from tqdm import tqdm
 import gymnasium as gym
@@ -45,8 +46,8 @@ class MeshRoutingEnv(gym.Env):
     
     def step(self, action):
         neighbors = self.neighbors_dict[self.current_node]
-        if action < 0 or action >= len(neighbors):
-            raise ValueError(f"Invalid action: {action}")
+        # if action < 0 or action >= len(neighbors):
+        #     raise ValueError(f"Invalid action: {action}")
         
         self.current_node = neighbors[action]
         self.route.append(self.current_node)
@@ -57,29 +58,39 @@ class MeshRoutingEnv(gym.Env):
         truncated = False  # No hay condición de truncado en este entorno
         info = {}
         
-        if terminated and self.current_node != self.goal_node:
-            reward = -100  # Penalización fuerte por terminar en un nodo que no es el objetivo
+        # if terminated and self.current_node != self.goal_node:
+        #     reward = -100  # Penalización fuerte por terminar en un nodo que no es el objetivo
         
         return observation, reward, terminated, truncated, info
     
     def render(self, mode='human'):
         G = nx.Graph()
-        
-        # Agregar nodos y aristas al grafo
+
         for node, neighbors in self.neighbors_dict.items():
             for neighbor in neighbors:
                 G.add_edge(node, neighbor)
-        
+
         pos = nx.spring_layout(G)
         plt.clf()  # Clear the current figure
-        
-        # Dibujar el grafo con aristas finas
+
         nx.draw(G, pos, with_labels=True, node_size=500, node_color="skyblue", font_weight='bold', edge_color='gray')
-        
-        # Dibujar la ruta con aristas gruesas
+
         route_edges = [(self.route[i], self.route[i+1]) for i in range(len(self.route)-1)]
         nx.draw_networkx_edges(G, pos, edgelist=route_edges, width=2, edge_color='r')
-        
+
+        if len(self.route) > 1:
+            start_node = self.route[-2]
+            end_node = self.route[-1]
+            start_pos = pos[start_node]
+            end_pos = pos[end_node]
+
+            plt.annotate(
+                '', 
+                xy=end_pos, 
+                xytext=start_pos,
+                arrowprops=dict(facecolor='blue', shrink=0.05)
+            )
+
         plt.title("Network Routing Visualization")
         plt.pause(0.01)  # Pause to update the plot
 
@@ -136,7 +147,7 @@ class MeshRoutingAgent:
 
 # Hyperparameters
 learning_rate = 0.01
-n_episodes = 100
+n_episodes = 10
 start_epsilon = 1.0
 epsilon_decay = start_epsilon / (n_episodes / 2)
 final_epsilon = 0.1
@@ -153,10 +164,18 @@ env = gym.wrappers.RecordEpisodeStatistics(env, deque_size=n_episodes)
 plt.ion()  # Turn on interactive mode
 fig, ax = plt.subplots()
 
+def print_q_table(agent, neighbors_dict):
+    q_table = {}
+    for state in range(len(neighbors_dict)):
+        q_table[state] = agent.q_values[state]
+    
+    df = pd.DataFrame(q_table)
+    print(df.T)
+
 # Main training loop
 for episode in tqdm(range(n_episodes)):
-    obs, info = env.reset()
-    done = False
+
+    print_q_table(agent, neighbors_dict)
 
     while not done:
         action = agent.get_action(obs)
@@ -166,12 +185,15 @@ for episode in tqdm(range(n_episodes)):
         # Render the environment
         env.render()
         plt.pause(0.01)  # Pause to update the plot
+        time.sleep(3)
+        print("actual node is: ", obs)
+        print("node's neighbors are: ", neighbors_dict[obs])
 
         done = terminated or truncated
         obs = next_obs
         agent.decay_epsilon()
 
-rolling_length = .5
+rolling_length = .05
 fig, axs = plt.subplots(ncols=3, figsize=(12, 5))
 
 # Episode Rewards
