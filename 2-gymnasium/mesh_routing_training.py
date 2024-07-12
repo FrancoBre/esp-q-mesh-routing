@@ -6,9 +6,12 @@
 # pip install gymnasium==0.27.0
 # pip install pandas
 # pip install networkx
+# pip install frozendict
 
 from __future__ import annotations
 from collections import defaultdict, deque
+# from copy import deepcopy
+from frozendict import frozendict
 
 import matplotlib.pyplot as plt
 import networkx as nx
@@ -19,6 +22,15 @@ import time
 
 from tqdm import tqdm
 import gymnasium as gym
+
+def print_q_table(agent, neighbors_dict):
+    q_table = {}
+    for state in range(len(neighbors_dict)):
+        q_table[state] = agent.q_values[state]
+
+    df = pd.DataFrame(q_table)
+    print()
+    print(df.T)
 
 # Definir el entorno de ruteo de paquetes
 class MeshRoutingEnv(gym.Env):
@@ -42,13 +54,18 @@ class MeshRoutingEnv(gym.Env):
         return self._get_observation(), {}
         
     def _get_observation(self):
+        self.action_space = gym.spaces.Discrete(len(self.neighbors_dict[self.current_node]))
         return self.current_node
     
     def step(self, action):
-        neighbors = self.neighbors_dict[self.current_node]
+        # neighbors = self.neighbors_dict[self.current_node]
+        neighbors = neighbors_dict[obs]
         # if action < 0 or action >= len(neighbors):
         #     raise ValueError(f"Invalid action: {action}")
-        
+        #
+        # print("DEBUG action: ", action)
+        # print("DEBUG neighbors: ", neighbors)
+        # print("DEBUG neighbors[action]: ", neighbors[action])
         self.current_node = neighbors[action]
         self.route.append(self.current_node)
         
@@ -97,15 +114,16 @@ class MeshRoutingEnv(gym.Env):
 # Ejemplo de uso
 initial_node = 0
 goal_node = 5
-neighbors_dict = {
+neighbors_dict = frozendict({
     0: [1, 2],
     1: [0, 3, 4],
     2: [0, 4],
     3: [1, 5],
     4: [1, 2, 5],
     5: [3, 4]  # Master server
-}
+})
 
+# env = MeshRoutingEnv(initial_node, deepcopy(neighbors_dict), goal_node)
 env = MeshRoutingEnv(initial_node, neighbors_dict, goal_node)
 
 # epsilon-greedy implementation for the new environment
@@ -126,11 +144,11 @@ class MeshRoutingAgent:
         self.final_epsilon = final_epsilon
         self.training_error = []
 
-    def get_action(self, obs):
+    def get_action(self, obs, action_space_size):
         if np.random.random() < self.epsilon:
-            return np.random.choice(len(neighbors_dict[obs]))  # Explore: choose a random action
+            return np.random.choice(action_space_size)  # Explore: choose a random action
         else:
-            return int(np.argmax(self.q_values[obs]))  # Exploit: choose the best action based on Q-values
+            return int(np.argmax(self.q_values[obs][:action_space_size]))  # Exploit: choose the best action based on Q-values
 
     def update(self, obs, action, reward, terminated, next_obs):
         future_q_values = (not terminated) * np.max(self.q_values[next_obs])
@@ -147,7 +165,8 @@ class MeshRoutingAgent:
 
 # Hyperparameters
 learning_rate = 0.01
-n_episodes = 10
+# n_episodes = 10
+n_episodes = 100
 start_epsilon = 1.0
 epsilon_decay = start_epsilon / (n_episodes / 2)
 final_epsilon = 0.1
@@ -164,44 +183,46 @@ env = gym.wrappers.RecordEpisodeStatistics(env, deque_size=n_episodes)
 plt.ion()  # Turn on interactive mode
 fig, ax = plt.subplots()
 
-def print_q_table(agent, neighbors_dict):
-    q_table = {}
-    for state in range(len(neighbors_dict)):
-        q_table[state] = agent.q_values[state]
-    
-    df = pd.DataFrame(q_table)
-    print(df.T)
-
 # Main training loop
 for episode in tqdm(range(n_episodes)):
-
     print_q_table(agent, neighbors_dict)
+    obs, info = env.reset()
+    done = False
 
     while not done:
-        action = agent.get_action(obs)
-        next_obs, reward, terminated, truncated, info = env.step(action)
-        agent.update(obs, action, reward, terminated, next_obs)
+        action_space_size = env.action_space.n  # Obtener el tamaño actual del espacio de acción
+        action_index = agent.get_action(obs, action_space_size)
+        next_action, reward, terminated, truncated, info = env.step(action_index)
+        agent.update(obs, action_index, reward, terminated, next_action)
 
         # Render the environment
         env.render()
         plt.pause(0.01)  # Pause to update the plot
-        time.sleep(3)
-        print("actual node is: ", obs)
-        print("node's neighbors are: ", neighbors_dict[obs])
+        # time.sleep(3)
+        print("")
+        print("actual node is: ", next_action)
+        print("node's neighbors are: ", neighbors_dict[next_action])
 
         done = terminated or truncated
-        obs = next_obs
+        obs = next_action
         agent.decay_epsilon()
 
-rolling_length = .05
+# rolling_length = .05
+rolling_length = 1
 fig, axs = plt.subplots(ncols=3, figsize=(12, 5))
 
 # Episode Rewards
+# reward_moving_average = (
+#     np.convolve(
+#         np.array(env.return_queue).flatten(), np.ones(rolling_length), mode="valid"
+# )
+#     ) / rolling_length
 reward_moving_average = (
     np.convolve(
-        np.array(env.return_queue).flatten(), np.ones(rolling_length), mode="valid"
+        np.array(env.length_queue).flatten(), np.ones(rolling_length), mode="valid"
     ) / rolling_length
 )
+
 axs[0].set_title("Episode Rewards")
 axs[0].plot(range(len(reward_moving_average)), reward_moving_average)
 
