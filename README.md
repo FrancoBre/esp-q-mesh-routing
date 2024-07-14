@@ -64,7 +64,7 @@ $ ./q_learning_poc
 ### 4. Arduino POC (Proof of Concept)
 This Arduino file (.ino) is a port of the C++ POC to be run in an ESP8266. It features a single episode, until finding the master server, in which the device enters deep sleep and awaits for restart to simulate a new episode.
 
-To run, flash on an ESP8266.
+To run, flash on an ESP8266 using arduino IDE or sm.
 
 ## Next Steps
  
