@@ -66,8 +66,9 @@ agent = MeshRoutingAgent(
 
 env = gym.wrappers.RecordEpisodeStatistics(env, deque_size=n_episodes)
 ```
-```
+
 ### Step 3: Run the Training Loop
+
 ```python
 plt.ion()  # Turn on interactive mode
 fig, ax = plt.subplots()
@@ -126,8 +127,7 @@ axs[2].plot(range(len(training_error_moving_average)), training_error_moving_ave
 plt.tight_layout()
 plt.show()
 ```
-```
-```
+
 ### Explanation
 #### MeshRoutingEnv
  - Initialization: The environment is initialized with the initial node, neighbors dictionary, and the goal node.
