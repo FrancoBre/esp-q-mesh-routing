@@ -1,6 +1,13 @@
 # Mesh Routing with Q-Learning
 
-This project implements a mesh routing simulation using Q-Learning. The goal is to find the optimal path to route a packet from an initial node to a master server in a mesh network.
+This project implements a mesh routing simulation using Q-Learning. The goal is to solve a routing problem in a mesh network using reinforcement learning, implemented with ESP devices. The main objective is to optimize the route to a central server, minimizing the number of hops required to reach it.
+
+Each ESP device will be flashed with software to handle packet reception and transmission in the mesh network, and to implement the Q-Learning algorithm. Each time an ESP receives a packet, it will update the Q-table, which has states defined by the current node and the set of neighboring nodes (obtained through the ESP-MESH library).
+
+The actions in the Q-table will consist of sending the packet to one of the neighboring nodes. At each hop, the Q-table will be updated using an ε-greedy algorithm. The reward for the algorithm will be -1 for each hop that does not reach the central server and +100 when the central server is reached. This way, we aim to optimize the use of the mesh network by minimizing the number of hops required to reach the central server.
+
+![8a0 (1)](https://github.com/user-attachments/assets/06467555-cd01-4b8c-bec0-57996327c314)
+
 
 ## Project Structure
 
@@ -16,6 +23,14 @@ This program uses the gymnasium library (a derivative of OpenAI Gym) to create a
 - mesh_routing_agent.py: Defines the agent that uses Q-Learning.
 - mesh_routing_env.py: Contains the definition of the custom Gym environment.
 - utils.py: Utility functions, including one to print the Q-table.
+
+Run with:
+```bash
+$ python3 main.py
+```
+
+![2024-07-1120-58-55online-video-cutter com1-ezgif com-video-to-gif-converter](https://github.com/user-attachments/assets/8c051953-d5f7-49ff-8958-199edd62eedd)
+
 
 For more details, you can consult the specific README within this folder.
 
