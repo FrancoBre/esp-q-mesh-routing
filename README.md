@@ -1,10 +1,12 @@
 # Mesh Routing with Q-Learning
 
-This project implements a mesh routing simulation using Q-Learning. The goal is to solve a routing problem in a mesh network using reinforcement learning, implemented with ESP devices. The main objective is to optimize the route to a central server, minimizing the number of hops required to reach it.
+This project implements a mesh routing simulation using Q-Learning. The goal is to solve a routing problem in a mesh network using reinforcement learning, implemented with ESP devices. The main objective is to optimize the route to a master node (which is the node that's connected to the router), minimizing the number of hops required to reach it.
+
+![9ecb6138-5f85-4ea1-809f-09d864d480a9](https://github.com/user-attachments/assets/b4e368f2-b956-4bad-a0d7-8ac717b5eb83)
 
 Each ESP device will be flashed with software to handle packet reception and transmission in the mesh network, and to implement the Q-Learning algorithm. Each time an ESP receives a packet, it will update the Q-table, which has states defined by the current node and the set of neighboring nodes (obtained through the ESP-MESH library).
 
-The actions in the Q-table will consist of sending the packet to one of the neighboring nodes. At each hop, the Q-table will be updated using an ε-greedy algorithm. The reward for the algorithm will be -1 for each hop that does not reach the central server and +100 when the central server is reached. This way, we aim to optimize the use of the mesh network by minimizing the number of hops required to reach the central server.
+The actions in the Q-table will consist of sending the packet to one of the neighboring nodes. At each hop, the Q-table will be updated using an ε-greedy algorithm. The reward for the algorithm will be -1 for each hop that does not reach the master node and +100 when the node is reached. This way, we aim to optimize the use of the mesh network by minimizing the number of hops required to reach the central server.
 
 ![8a0 (1)](https://github.com/user-attachments/assets/06467555-cd01-4b8c-bec0-57996327c314)
 
