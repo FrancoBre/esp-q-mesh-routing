@@ -17,19 +17,27 @@ int chooseAction(int state, JsonDocument& doc, float epsilon);
 void sendMessageToNextHop(uint32_t next_hop, String &msg);
 
 void newConnectionCallback(uint32_t nodeId) {
-    Serial.printf("--> startHere: New Connection, nodeId = %u\n", nodeId);
+  Serial.print("--> startHere: New Connection, nodeId = ");
+  Serial.println(nodeId);
 }
 
 void changedConnectionCallback() {
-  Serial.printf("Changed connections\n");
+  Serial.println("Changed connections");
 }
 
 void nodeTimeAdjustedCallback(int32_t offset) {
-    Serial.printf("Adjusted time %u. Offset = %d\n", mesh.getNodeTime(),offset);
+  Serial.print("Adjusted time ");
+  Serial.print(mesh.getNodeTime());
+  Serial.print(". Offset = ");
+  Serial.println(offset);
 }
 
 void receivedCallback(uint32_t from, String &msg) {
-  Serial.printf("startHere: Received from %u msg=%s\n", from, msg.c_str());
+  Serial.print("startHere: Received from ");
+  Serial.print(from);
+  Serial.print(" msg=");
+  Serial.println(msg);
+  Serial.flush();
 
   // Deserialize the JSON message
   StaticJsonDocument<1024> doc;
@@ -38,6 +46,7 @@ void receivedCallback(uint32_t from, String &msg) {
   if (error) {
     Serial.print(F("deserializeJson() failed: "));
     Serial.println(error.c_str());
+    Serial.flush();
     return;
   }
 
@@ -48,14 +57,28 @@ void receivedCallback(uint32_t from, String &msg) {
   float q_epsilonDecay = doc["q_parameters"]["epsilon_decay"];
 
   Serial.println("Extracted Q-learning parameters:");
-  Serial.printf("alpha: %f, gamma: %f, epsilon: %f, epsilonDecay: %f\n", q_alpha, q_gamma, q_epsilon, q_epsilonDecay);
+  Serial.print("alpha: ");
+  Serial.print(q_alpha);
+  Serial.print(", gamma: ");
+  Serial.print(q_gamma);
+  Serial.print(", epsilon: ");
+  Serial.print(q_epsilon);
+  Serial.print(", epsilonDecay: ");
+  Serial.println(q_epsilonDecay);
+  Serial.flush();
 
   int current_episode = doc["current_episode"];
   float accumulated_reward = doc["accumulated_reward"];
   float total_time = doc["total_time"];
 
   Serial.println("Extracted episode information:");
-  Serial.printf("Current episode: %d, Accumulated reward: %f, Total time: %f\n", current_episode, accumulated_reward, total_time);
+  Serial.print("Current episode: ");
+  Serial.print(current_episode);
+  Serial.print(", Accumulated reward: ");
+  Serial.print(accumulated_reward);
+  Serial.print(", Total time: ");
+  Serial.println(total_time);
+  Serial.flush();
 
   JsonArray episodes = doc["episodes"];
   for (JsonObject episode : episodes) {
@@ -64,7 +87,13 @@ void receivedCallback(uint32_t from, String &msg) {
     float time = episode["time"];
 
     Serial.println("Processing episode:");
-    Serial.printf("Episode number: %d, Reward: %f, Time: %f\n", episode_number, reward, time);
+    Serial.print("Episode number: ");
+    Serial.print(episode_number);
+    Serial.print(", Reward: ");
+    Serial.print(reward);
+    Serial.print(", Time: ");
+    Serial.println(time);
+    Serial.flush();
 
     JsonArray steps = episode["steps"];
     for (JsonObject step : steps) {
@@ -73,11 +102,18 @@ void receivedCallback(uint32_t from, String &msg) {
       String node_to = String(mesh.getNodeId());
 
       Serial.println("Processing step:");
-      Serial.printf("Hop: %d, Node from: %s, Node to: %s\n", hop, node_from.c_str(), node_to.c_str());
+      Serial.print("Hop: ");
+      Serial.print(hop);
+      Serial.print(", Node from: ");
+      Serial.print(node_from);
+      Serial.print(", Node to: ");
+      Serial.println(node_to);
+      Serial.flush();
 
       // Add reward to episode
       episode["reward"] = -1; // This node is not master!
       Serial.println("Updated episode reward to -1");
+      Serial.flush();
 
       // Update Q-Table
       updateQTable(node_from, node_to, episode["reward"], q_alpha, q_gamma, doc);
@@ -85,7 +121,9 @@ void receivedCallback(uint32_t from, String &msg) {
       // Choose next action using epsilon-greedy policy
       int next_action = chooseAction(mesh.getNodeId(), doc, q_epsilon);
 
-      Serial.printf("Chosen next action: %d\n", next_action);
+      Serial.print("Chosen next action: ");
+      Serial.println(next_action);
+      Serial.flush();
 
       // Send updated message to the next hop
       String updatedJsonString;
@@ -96,8 +134,33 @@ void receivedCallback(uint32_t from, String &msg) {
 }
 
 void updateQTable(String state_from, String state_to, float reward, float alpha, float gamma, JsonDocument& doc) {
+  auto nodes = mesh.getNodeList(true);
+  std::vector<int> neighbors;
+  String nodesStr;
+  int num_neighbors = 0;
+
   JsonObject q_table = doc["q_table"];
-  
+  for (auto &&id : nodes) {
+    String node_from = String(id);
+    for (auto &&id_2 : nodes) {
+      String node_to = String(id_2);
+
+      if (id_2 != id) {
+        if (!q_table.containsKey(node_from)) {
+          q_table.createNestedObject(node_from);
+        }
+
+        if (!q_table[node_to].containsKey(node_to)) {
+          q_table[node_from][node_to] = 0.0; // Initialize Q-value if not present
+        }
+      }
+    }
+  }
+
+  Serial.println("Q-table:");
+  serializeJsonPretty(q_table, Serial);
+  Serial.flush();
+
   // Ensure state_from exists in q_table
   if (!q_table.containsKey(state_from)) {
     q_table.createNestedObject(state_from);
@@ -133,6 +196,7 @@ void updateQTable(String state_from, String state_to, float reward, float alpha,
   Serial.println("Updated Q-table:");
   serializeJsonPretty(q_table, Serial);
   Serial.println();
+  Serial.flush();
 }
 
 int chooseAction(int state, JsonDocument& doc, float epsilon) {
@@ -148,13 +212,19 @@ int chooseAction(int state, JsonDocument& doc, float epsilon) {
     Serial.print(nodesStr);
     num_neighbors++;
   }
+  Serial.flush();
 
   if (num_neighbors == 0) {
     Serial.println("No neighbors found");
     return -1;
   }
+  Serial.flush();
 
-  Serial.printf("Neighbors for state %s are %s\n", String(state), nodesStr);
+  Serial.print("Neighbors for state ");
+  Serial.print(String(state));
+  Serial.print(" are ");
+  Serial.println(nodesStr);
+  Serial.flush();
 
   if (random() < epsilon) {
     // Explore
@@ -162,12 +232,15 @@ int chooseAction(int state, JsonDocument& doc, float epsilon) {
     int action = neighbors[action_index];
     Serial.println("Exploring action");
     Serial.println(action);
+    Serial.flush();
     return action;
   } else {
     // Exploit: Choose the action with the highest Q-value
     JsonObject q_table = doc["q_table"];
     if (!q_table.containsKey(String(state))) {
-      Serial.println("No Q-values found for state");
+      Serial.print("No Q-values found for state");
+      Serial.println(String(state));
+      Serial.flush();
       return -1;
     }
 
@@ -175,33 +248,53 @@ int chooseAction(int state, JsonDocument& doc, float epsilon) {
     float best_value = -1.0;
     String best_action = "";
     Serial.println("Starting exploitation phase...");
+    Serial.flush();
     for (JsonPair kv : actions) {
       String action = kv.key().c_str();
       float value = kv.value().as<float>();
       uint32_t action_int = action.toInt();
-      Serial.printf("Checking action: %s with value %f\n", action.c_str(), value);
+      Serial.print("Checking action: ");
+      Serial.print(action.c_str());
+      Serial.print(" with value ");
+      Serial.println(value);
+      Serial.flush();
       if (value > best_value && std::find(neighbors.begin(), neighbors.end(), action_int) != neighbors.end()) {
-        Serial.printf("Action %s is a valid neighbor and has a better value %f\n", action.c_str(), value);
+        Serial.print("Action ");
+        Serial.print(action.c_str());
+        Serial.print(" is a valid neighbor and has a better value ");
+        Serial.println(value);
+        Serial.flush();
         best_value = value;
         best_action = action;
       } else {
-        Serial.printf("Action %s is not valid or does not have a better value\n", action.c_str());
+        Serial.print("Action ");
+        Serial.print(action.c_str());
+        Serial.println(" is not valid or does not have a better value");
+        Serial.flush();
       }
     }
-    Serial.printf("Exploiting best action: %s with value %f\n", best_action.c_str(), best_value);
+    Serial.print("Exploiting best action: ");
+    Serial.print(best_action.c_str());
+    Serial.print(" with value ");
+    Serial.println(best_value);
+    Serial.flush();
     return best_action.toInt();
   }
 }
 
 void sendMessageToNextHop(uint32_t next_hop, String &msg) {
-  Serial.printf("Sending message to next hop %u: %s\n", next_hop, msg.c_str());
+  Serial.print("Sending message to next hop ");
+  Serial.print(next_hop);
+  Serial.print(": ");
+  Serial.println(msg);
+  Serial.flush();
   mesh.sendSingle(next_hop, msg);
 }
 
 void setup() {
   Serial.begin(115200);
 
-//mesh.setDebugMsgTypes( ERROR | MESH_STATUS | CONNECTION | SYNC | COMMUNICATION | GENERAL | MSG_TYPES | REMOTE ); // all types on
+  //mesh.setDebugMsgTypes( ERROR | MESH_STATUS | CONNECTION | SYNC | COMMUNICATION | GENERAL | MSG_TYPES | REMOTE ); // all types on
   mesh.setDebugMsgTypes( ERROR | STARTUP );  // set before init() so that you can see startup messages
 
   mesh.init( MESH_PREFIX, MESH_PASSWORD, &userScheduler, MESH_PORT );

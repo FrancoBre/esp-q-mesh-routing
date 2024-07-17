@@ -1,8 +1,8 @@
 #include "painlessMesh.h"
 
-#define   MESH_PREFIX     "whateverYouLike"
-#define   MESH_PASSWORD   "somethingSneaky"
-#define   MESH_PORT       5555
+#define MESH_PREFIX "whateverYouLike"
+#define MESH_PASSWORD "somethingSneaky"
+#define MESH_PORT 5555
 
 // Q-Learning Parameters (only for node 1 to start the learning)
 String q_alpha = "0.1";  // Learning rate
@@ -14,15 +14,15 @@ Scheduler userScheduler; // to control your personal task
 painlessMesh mesh;
 
 // User stub
-void sendMessage() ; // Prototype so PlatformIO doesn't complain
-void printNeighbors();
+void sendMessage(); // Prototype so PlatformIO doesn't complain
 String getNetworkDataToSend();
 
-Task taskSendMessage( TASK_SECOND * 1 , TASK_FOREVER, &sendMessage );
+Task taskSendMessage(TASK_SECOND * 10, TASK_FOREVER, &sendMessage);
 
 void sendMessage() {
+  mesh.subConnectionJson(true);
   StaticJsonDocument<1024> doc;
-  doc["node_id"] = mesh.getNodeId();
+  doc["current_node_id"] = String(mesh.getNodeId());
 
   JsonObject q_parameters = doc.createNestedObject("q_parameters");
   q_parameters["alpha"] = q_alpha;
@@ -31,71 +31,67 @@ void sendMessage() {
   q_parameters["epsilon_decay"] = q_epsilonDecay;
 
   doc["current_episode"] = 1;
+  doc["accumulated_reward"] = 0.0;
+  doc["total_time"] = 0.0;
+
   JsonArray episodesArray = doc.createNestedArray("episodes");
   JsonObject episode = episodesArray.createNestedObject();
   episode["episode_number"] = 1;
-  episode["reward"] = 0;
+  episode["reward"] = 0.0;
+  episode["time"] = 0.0;
 
   JsonArray stepsArray = episode.createNestedArray("steps");
   JsonObject step = stepsArray.createNestedObject();
   step["hop"] = 0;
-  step["node_visited"] = mesh.getNodeId();
+  step["node_from"] = String(mesh.getNodeId());
+  // step["node_to"] = String(mesh.getNodeId());
+
+  JsonObject q_table = doc.createNestedObject("q_table");
+  JsonObject action = q_table.createNestedObject(String(mesh.getNodeId()));
 
   String jsonString;
   serializeJsonPretty(doc, jsonString);
 
-  mesh.sendBroadcast( jsonString );
-  taskSendMessage.setInterval( random( TASK_SECOND * 1, TASK_SECOND * 5 ));
+  mesh.sendBroadcast(jsonString);
+  taskSendMessage.setInterval(random(TASK_SECOND * 1, TASK_SECOND * 5));
 }
 
 // Needed for painless library
-void receivedCallback( uint32_t from, String &msg ) {
-  Serial.printf("startHere: Received from %u msg=%s\n", from, msg.c_str());
+void receivedCallback(uint32_t from, String &msg) {
+  Serial.print("startHere: Received from ");
+  Serial.print(from);
+  Serial.print(" msg=");
+  Serial.println(msg.c_str());
 }
 
 void newConnectionCallback(uint32_t nodeId) {
-    Serial.printf("--> startHere: New Connection, nodeId = %u\n", nodeId);
+  Serial.print("--> startHere: New Connection, nodeId = ");
+  Serial.println(nodeId);
 }
 
 void changedConnectionCallback() {
-  Serial.printf("Changed connections\n");
+  Serial.println("Changed connections");
 }
 
 void nodeTimeAdjustedCallback(int32_t offset) {
-    Serial.printf("Adjusted time %u. Offset = %d\n", mesh.getNodeTime(),offset);
-}
-
-void printNeighbors() {
-    Serial.print("NODE 1: ");
-    Serial.println(mesh.getNodeId());
-
-    std::list<uint32_t> nodes = mesh.getNodeList();
-    Serial.println("CONNECTED NODES: ");
-    Serial.print("Num nodes: ");
-    Serial.println(nodes.size());
-    Serial.println("Connection list:");
-
-    SimpleList<uint32_t>::iterator node = nodes.begin();
-    while (node != nodes.end()) {
-      Serial.print(*node);
-      node++;
-    }
-
-    Serial.println();
+  Serial.print("Adjusted time ");
+  Serial.print(mesh.getNodeTime());
+  Serial.print(". Offset = ");
+  Serial.println(offset);
 }
 
 void setup() {
   Serial.begin(115200);
 
-  mesh.setDebugMsgTypes( ERROR | STARTUP );  // set before init() so that you can see startup messages
+  mesh.setDebugMsgTypes(ERROR | STARTUP);  // set before init() so that you can see startup messages
 
-  mesh.init( MESH_PREFIX, MESH_PASSWORD, &userScheduler, MESH_PORT );
+  mesh.init(MESH_PREFIX, MESH_PASSWORD, &userScheduler, MESH_PORT);
   mesh.onReceive(&receivedCallback);
   mesh.onNewConnection(&newConnectionCallback);
   mesh.onChangedConnections(&changedConnectionCallback);
   mesh.onNodeTimeAdjusted(&nodeTimeAdjustedCallback);
 
-  userScheduler.addTask( taskSendMessage );
+  userScheduler.addTask(taskSendMessage);
   taskSendMessage.enable();
 }
 
