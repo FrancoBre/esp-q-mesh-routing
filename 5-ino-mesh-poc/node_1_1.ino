@@ -10,14 +10,11 @@ String q_gamma = "0.9";  // Discount factor
 String q_epsilon = "0.1";  // Exploration rate
 String q_epsilonDecay = "0.1";  // Exploration rate
 
-Scheduler userScheduler; // to control your personal task
 painlessMesh mesh;
 
 // User stub
 void sendMessage(); // Prototype so PlatformIO doesn't complain
 String getNetworkDataToSend();
-
-Task taskSendMessage(TASK_SECOND * 10, TASK_FOREVER, &sendMessage);
 
 void sendMessage() {
   mesh.subConnectionJson(true);
@@ -52,8 +49,12 @@ void sendMessage() {
   String jsonString;
   serializeJsonPretty(doc, jsonString);
 
-  mesh.sendBroadcast(jsonString);
-  taskSendMessage.setInterval(random(TASK_SECOND * 1, TASK_SECOND * 5));
+  // Send message to first encountered neighbor, for simplicity
+  auto nodes = mesh.getNodeList();
+  for (auto &&id : nodes) {
+    mesh.sendSingle(id, jsonString);
+    return;
+  }
 }
 
 // Needed for painless library
@@ -90,9 +91,6 @@ void setup() {
   mesh.onNewConnection(&newConnectionCallback);
   mesh.onChangedConnections(&changedConnectionCallback);
   mesh.onNodeTimeAdjusted(&nodeTimeAdjustedCallback);
-
-  userScheduler.addTask(taskSendMessage);
-  taskSendMessage.enable();
 }
 
 void loop() {
