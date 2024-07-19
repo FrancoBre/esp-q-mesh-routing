@@ -111,7 +111,7 @@ void receivedCallback(uint32_t from, String &msg) {
       Serial.flush();
 
       // Add reward to episode
-      episode["reward"] = episode["reward"] - 1; // This node is not master!
+      episode["reward"] = reward - 1; // This node is not master!
       Serial.println("This node is not master! Reduce episode reward in 1");
       Serial.flush();
 

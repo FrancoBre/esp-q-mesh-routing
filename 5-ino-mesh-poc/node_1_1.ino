@@ -68,6 +68,7 @@ void receivedCallback(uint32_t from, String &msg) {
 void newConnectionCallback(uint32_t nodeId) {
   Serial.print("--> startHere: New Connection, nodeId = ");
   Serial.println(nodeId);
+  sendMessage();
 }
 
 void changedConnectionCallback() {
@@ -86,7 +87,8 @@ void setup() {
 
   mesh.setDebugMsgTypes(ERROR | STARTUP);  // set before init() so that you can see startup messages
 
-  mesh.init(MESH_PREFIX, MESH_PASSWORD, &userScheduler, MESH_PORT);
+  //mesh.init(MESH_PREFIX, MESH_PASSWORD, &userScheduler, MESH_PORT);
+  mesh.init(MESH_PREFIX, MESH_PASSWORD, MESH_PORT);
   mesh.onReceive(&receivedCallback);
   mesh.onNewConnection(&newConnectionCallback);
   mesh.onChangedConnections(&changedConnectionCallback);

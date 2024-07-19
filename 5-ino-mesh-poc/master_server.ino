@@ -10,28 +10,21 @@
 
 ESP8266WiFiMulti WiFiMulti;
 
-#define   MESH_PREFIX     "whateverYouLike"
-#define   MESH_PASSWORD   "somethingSneaky"
-#define   MESH_PORT       5555
-#define   SECRET_SSID     ""
-#define   SECRET_PASS     ""
-
-int status = WL_IDLE_STATUS;
-long lastConnectionTime = 0; 
-boolean lastConnected = false;
-int failedCounter = 0;
+#define   MESH_PREFIX         "whateverYouLike"
+#define   MESH_PASSWORD       "somethingSneaky"
+#define   MESH_PORT           5555
+#define   SECRET_SSID         ""
+#define   SECRET_PASS         ""
+#define   THING_SPEAK_API_KEY ""
 
 Scheduler userScheduler; // to control your personal task
 painlessMesh mesh;
 
+String path = "";
+
 void receivedCallback(uint32_t from, String &msg);
 void updateQTable(String state_from, String state_to, float reward, float alpha, float gamma, JsonDocument& doc);
 void sendMessageToServer(String &msg);
-
-// ThingSpeak Settings
-char thingSpeakAddress[] = "api.thingspeak.com";
-String writeAPIKey = "";
-const int updateThingSpeakInterval = 16 * 1000;      // Time interval in milliseconds to update ThingSpeak (number of seconds * 1000 = interval)
 
 void newConnectionCallback(uint32_t nodeId) {
   Serial.print("--> startHere: New Connection, nodeId = ");
@@ -138,7 +131,8 @@ void receivedCallback(uint32_t from, String &msg) {
       // Send updated message to the next hop
       String updatedJsonString;
       serializeJson(doc, updatedJsonString);
-      updateThingSpeak(updatedJsonString);
+      formatPath(path, updatedJsonString);
+      updateThingSpeak(path);
     }
   }
 }
@@ -209,95 +203,15 @@ void updateQTable(String state_from, String state_to, float reward, float alpha,
   Serial.flush();
 }
 
-int chooseAction(int state, JsonDocument& doc, float epsilon) {
-  auto nodes = mesh.getNodeList(true);
-  std::vector<int> neighbors;
-  String nodesStr;
-  int num_neighbors = 0;
-
-  Serial.print("iterating over node list ");
-  for (auto &&id : nodes) {
-    neighbors.push_back(id);
-    nodesStr += String(id) + String(" ");
-    Serial.print(nodesStr);
-    num_neighbors++;
-  }
-  Serial.flush();
-
-  if (num_neighbors == 0) {
-    Serial.println("No neighbors found");
-    return -1;
-  }
-  Serial.flush();
-
-  Serial.print("Neighbors for state ");
-  Serial.print(String(state));
-  Serial.print(" are ");
-  Serial.println(nodesStr);
-  Serial.flush();
-
-  if (random() < epsilon) {
-    // Explore
-    int action_index = random(0, num_neighbors - 1);
-    int action = neighbors[action_index];
-    Serial.println("Exploring action");
-    Serial.println(action);
-    Serial.flush();
-    return action;
-  } else {
-    // Exploit: Choose the action with the highest Q-value
-    JsonObject q_table = doc["q_table"];
-    if (!q_table.containsKey(String(state))) {
-      Serial.print("No Q-values found for state");
-      Serial.println(String(state));
-      Serial.flush();
-      return -1;
-    }
-
-    JsonObject actions = q_table[String(state)];
-    float best_value = -1.0;
-    String best_action = "";
-    Serial.println("Starting exploitation phase...");
-    Serial.flush();
-    for (JsonPair kv : actions) {
-      String action = kv.key().c_str();
-      float value = kv.value().as<float>();
-      uint32_t action_int = action.toInt();
-      Serial.print("Checking action: ");
-      Serial.print(action.c_str());
-      Serial.print(" with value ");
-      Serial.println(value);
-      Serial.flush();
-      if (value > best_value && std::find(neighbors.begin(), neighbors.end(), action_int) != neighbors.end()) {
-        Serial.print("Action ");
-        Serial.print(action.c_str());
-        Serial.print(" is a valid neighbor and has a better value ");
-        Serial.println(value);
-        Serial.flush();
-        best_value = value;
-        best_action = action;
-      } else {
-        Serial.print("Action ");
-        Serial.print(action.c_str());
-        Serial.println(" is not valid or does not have a better value");
-        Serial.flush();
-      }
-    }
-    Serial.print("Exploiting best action: ");
-    Serial.print(best_action.c_str());
-    Serial.print(" with value ");
-    Serial.println(best_value);
-    Serial.flush();
-    return best_action.toInt();
-  }
-}
-
-void updateThingSpeak(String tsData) {
+void updateThingSpeak(String path) {
   Serial.print("Sending final q-learning information to server ");
   Serial.print(": ");
-  Serial.println(tsData);
+  Serial.println(path);
   Serial.flush();
 
+  bool wifiConnected = (WiFi.status() == WL_CONNECTED);
+  Serial.println(wifiConnected);
+  
   if ((WiFi.status() == WL_CONNECTED)) {
 
     WiFiClient client;
@@ -305,7 +219,13 @@ void updateThingSpeak(String tsData) {
 
     Serial.print("[HTTP] begin...\n");
     // configure traged server and url
-    if (http.begin(client, "api.thingspeak.com/update?api_key=" + writeAPIKey + "&field1=" + tsData)) {  // HTTP
+    //String serverUrl = "https://api.thingspeak.com/update?api_key=" + String(THING_SPEAK_API_KEY) + "&field1=" + tsData;
+    String serverUrl = path;
+    Serial.print("Server url: ");
+    Serial.println(serverUrl);
+    Serial.flush();
+
+    if (http.begin(client, serverUrl)) {  // HTTP
       Serial.print("[HTTP] GET...\n");
       // start connection and send HTTP header
       int httpCode = http.GET();
@@ -327,25 +247,36 @@ void updateThingSpeak(String tsData) {
     } else {
       Serial.println("[HTTP] Unable to connect");
     }
+  } else {
+    Serial.println("Wifi is not connected");
   }
+}
+
+void formatPath(String& p, String learningResults)
+{
+  // String serverUrl = "https://api.thingspeak.com/update?api_key=" + String(THING_SPEAK_API_KEY) + "&field1=" + tsData;
+  p = "https://api.thingspeak.com/update?api_key=";
+  p += String(THING_SPEAK_API_KEY);
+  p += "&field1=";
+  p += learningResults;
 }
 
 void setup() {
   Serial.begin(115200);
+  // Serial.setDebugOutput(true);
 
-  WiFi.begin(SECRET_SSID, SECRET_PASS);
+  Serial.println();
+  Serial.println();
+  Serial.println();
 
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+  for (uint8_t t = 4; t > 0; t--) {
+    Serial.printf("[SETUP] WAIT %d...\n", t);
+    Serial.flush();
+    delay(1000);
   }
-  Serial.println("");
-  Serial.print("Connected! IP address: ");
-  Serial.println(WiFi.localIP());
-  
-  // print the SSID of the network you're attached to:
-  Serial.print("SSID: ");
-  Serial.println(WiFi.SSID());
+
+  WiFi.mode(WIFI_STA);
+  WiFiMulti.addAP("Speedy-Fibra-C19C2E", "qazwsxed");
 
   //mesh.setDebugMsgTypes( ERROR | MESH_STATUS | CONNECTION | SYNC | COMMUNICATION | GENERAL | MSG_TYPES | REMOTE ); // all types on
   mesh.setDebugMsgTypes( ERROR | STARTUP );  // set before init() so that you can see startup messages
