@@ -151,6 +151,11 @@ void receivedCallback(uint32_t from, String &msg) {
       String updatedJsonString;
       serializeJson(doc, updatedJsonString);
       qTable = doc["q_table"];
+
+      // print learning results so the middleware catches them and sends it over 
+      // to the server
+      Serial.print("Log message with structure: ");
+      Serial.println(updatedJsonString);
       //formatPath(path);
       //sendLearningDataToServer(path, updatedJsonString);
     }
