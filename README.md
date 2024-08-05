@@ -1,75 +1,86 @@
 # Mesh Routing with Q-Learning
 
-This project implements a mesh routing simulation using Q-Learning. The goal is to solve a routing problem in a mesh network using reinforcement learning, implemented with ESP devices. The main objective is to optimize the route to a master node (which is the node that's connected to the router), minimizing the number of hops required to reach it.
+This project implements a mesh network routing system using Q-Learning. The goal is to solve a routing problem in a mesh network using reinforcement learning, implemented with ESP devices. The main objective is to optimize the route from a `sender node`, streaming sensor data obtained with a DHT11 to a `master node` (which is the node that's connected to a server, which is connected to a router), minimizing the number of hops required to reach it.
 
-![9ecb6138-5f85-4ea1-809f-09d864d480a9](https://github.com/user-attachments/assets/b4e368f2-b956-4bad-a0d7-8ac717b5eb83)
+![infrastructure (1)](https://github.com/user-attachments/assets/3d4fac86-66f3-4d0a-aa06-6f3a00470c4f)
 
 Each ESP device will be flashed with software to handle packet reception and transmission in the mesh network, and to implement the Q-Learning algorithm. Each time an ESP receives a packet, it will update the Q-table, which has states defined by the current node and the set of neighboring nodes (obtained through the ESP-MESH library).
 
 The actions in the Q-table will consist of sending the packet to one of the neighboring nodes. At each hop, the Q-table will be updated using an ε-greedy algorithm. The reward for the algorithm will be -1 for each hop that does not reach the master node and +100 when the node is reached. This way, we aim to optimize the use of the mesh network by minimizing the number of hops required to reach the central server.
 
-![8a0 (1)](https://github.com/user-attachments/assets/06467555-cd01-4b8c-bec0-57996327c314)
+## How does the learning works
 
+Here’s a step-by-step explanation of how the learning process works:
 
-## Project Structure
+1. **Initialization**: 
+   - Each node starts with an empty Q-table. The Q-table maps states (neighboring nodes) to actions (hops to neighboring nodes) with corresponding Q-values.
+   - The Q-learning parameters include the learning rate (alpha), discount factor (gamma), and exploration rate (epsilon).
 
-The project is organized into sections, each demonstrating different incremental approaches to implementing the Q-Learning logic and packet routing simulation.
+2. **Receiving a Hop**: 
+   - When a node receives a hop, it uses its Q-table to decide the next hop.
+   - The decision is based on two strategies:
+     - **Exploit (1 - epsilon)**: Choose the neighboring node with the highest Q-value.
+     - **Explore (epsilon)**: Randomly choose a neighboring node to explore new paths.
 
-### 1. Vanilla Python
-This script implements a basic network routing simulation using Q-Learning in Python. It does not rely on any external libraries and serves as an introductory implementation of the Q-Learning algorithm applied to packet routing.
+3. **Updating the Q-table**: 
+   - Each time a hop is forwarded, the Q-table is updated.
+   - The Q-value is updated using the formula: 
+     \[
+     Q(s, a) = Q(s, a) + \alpha \left( r + \gamma \max_a Q(s', a') - Q(s, a) \right)
+     \]
+     where \( s \) is the current state, \( a \) is the action taken, \( r \) is the reward, \( s' \) is the next state, and \( a' \) is the next action.
 
-To run:
+4. **Reward System**: 
+   - For every hop that does not reach the master node, the node receives a reward of -1.
+   - When the hop reaches the master node, the node receives a reward of +100.
+
+5. **Broadcasting the Q-Table**:
+   - When the hop reaches the master node, the master node broadcasts the updated Q-table to all nodes in the network.
+   - This ensures all nodes have the latest learning results, allowing them to make informed decisions on the best hop.
+
+![sender-intermediate-master](https://github.com/user-attachments/assets/af65e433-a2b9-45f8-bbc7-f9211c1d41ca)
+
+6. **Middleware and Server**:
+   - A middleware script running on a PC reads the serial monitor output from the master node and sends relevant learning results to a server.
+   - The server receives learning data, logs it, and visualizes it in a web interface for analysis.
+
+![master-middleware-server](https://github.com/user-attachments/assets/2738826d-d479-40a9-b36d-fa9a73e2d3a7)
+
+This setup ensures that all nodes in the network have the latest learning results, allowing them to make informed decisions on the best hop to optimize packet routing.
+
+## Setup
+
+\>1 ESP8266 devices are required for the mesh network:
+ - One `sender node`.
+ - One or more than one `intermediate nodes`.
+ - And a `master node`.
+
+Flash `sender-node.ino`, `intermediate-node.ino` and `master-node.ino` respectively using Arduino IDE. Also, required dependencies are `painlessMesh`, `TaskScheduler`, `ArduinoJson` and `AsyncTCP`.
+There are plenty of tutorials online on how to program an ESP8266, but if you are too lazy to search, [here](https://www.youtube.com/watch?v=lQm3YKkXPNc)'s one.
+
+Once you have flashed the nodes, do the following:
+
+1. Run the server in which the learning data is received to be visualized and analyzed.
 ```bash
-$ python3 q_learning_mesh.py
+$ cd learning-visualization-server
+$ python3 server.py
+```
+This will run a server in `localhost:5000`. Required pip dependencies are `Flask` `plotly` and `pandas`.
+
+2. Run the middleware that grabs the results of the learning process.
+```bash
+$ cd ..
+$ cd learning-results-grabbing
+$ python3 middleware.py
 ```
 
-### 2. Gymnasium
-This program uses the gymnasium library (a derivative of OpenAI Gym) to create a more robust and structured simulation environment. The scripts define a custom environment for the routing problem and an agent that uses Q-Learning to learn the optimal path.
+3. Plug the master node (the serial port device in the code is assumed to be `/dev/ttyUSB0`, change as needed).
 
-- main.py: The main script that runs the simulation and training loop.
-- mesh_routing_agent.py: Defines the agent that uses Q-Learning.
-- mesh_routing_env.py: Contains the definition of the custom Gym environment.
-- utils.py: Utility functions, including one to print the Q-table.
+4. Plug the sender node and the intermediate nodes for the learning to start.
 
-Make sure to install required dependencies:
-```bash
-$ pip install matplotlib
-$ pip install numpy
-$ pip install seaborn
-$ pip install tqdm
-$ pip install gymnasium==0.27.0
-$ pip install pandas
-$ pip install networkx
-```
-
-And run with:
-```bash
-$ python3 main.py
-```
-
-![2024-07-1120-58-55online-video-cutter com1-ezgif com-video-to-gif-converter](https://github.com/user-attachments/assets/8c051953-d5f7-49ff-8958-199edd62eedd)
-
-
-For more details, you can consult the specific README within this folder.
-
-### 3. C++ POC (Proof of Concept)
-This program features a standalone (that is, that can run on a PC instead of an ESP device, like >4 sections) proof of concept in C++ for implementing the Q-Learning algorithm. It simulates 100 episodes in which the learning occurs. 
-
-To run:
-```bash
-$ g++ q_learning_poc.cpp -o q_learning_poc
-$ ./q_learning_poc
-```
-
-### 4. Arduino POC (Proof of Concept)
-This Arduino file (.ino) is a port of the C++ POC to be run in an ESP8266. It features a single episode, until finding the master server, in which the device enters deep sleep and awaits for restart to simulate a new episode.
-
-To run, flash on an ESP8266 using arduino IDE or sm.
+Demo:
+https://github.com/user-attachments/assets/84d4e89f-cd16-4f19-8628-ede290551f67
 
 ## Next Steps
- 
- 1. *Create a Mesh Network*: Implement a mesh network using ESP8266.
- 2. *Incorporate Q-Learning*: Integrate Q-Learning logic into the mesh network to optimize packet routing.
- 3. *Integrate with gymnasium*: Make somehow gymnasium intercept the functioning of the actual mesh network to provide metrics and allow to tweak parameters based on results.
- 
-The aim is to move towards practical testing on real hardware to demonstrate the applicability of these POCs in real-world scenarios.
+
+Test with more nodes to tweak learning parameters, or create a simulation with more nodes to do so.
