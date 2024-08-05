@@ -68,106 +68,144 @@ void sendMessage() {
   }
 }
 
+
+bool isHopMessage(StaticJsonDocument<1024> doc) {
+  return doc.containsKey("current_node_id") && doc.containsKey("q_parameters")
+    && doc.containsKey("current_episode") && doc.containsKey("episodes") 
+    && doc.containsKey("q_table");
+}
+
 // Needed for painless library
 void receivedCallback(uint32_t from, String &msg) {
-  Serial.print("startHere: Received from ");
-  Serial.print(from);
-  Serial.print(" msg=");
-  Serial.println(msg.c_str());
+    Serial.print("startHere: Received from ");
+    Serial.print(from);
+    Serial.print(" msg=");
+    Serial.println(msg.c_str());
 
-  // Deserialize the JSON message
-  StaticJsonDocument<1024> doc;
-  DeserializationError error = deserializeJson(doc, msg);
+    // Deserialize the JSON message
+    StaticJsonDocument<1024> doc;
+    DeserializationError error = deserializeJson(doc, msg);
 
-  if (error) {
-    Serial.print(F("deserializeJson() failed: "));
-    Serial.println(error.c_str());
-    Serial.flush();
-    return;
-  }
-
-  // Extract q-learning parameters and state information
-  float q_alpha = doc["q_parameters"]["alpha"];
-  float q_gamma = doc["q_parameters"]["gamma"];
-  float q_epsilon = doc["q_parameters"]["epsilon"];
-  float q_epsilonDecay = doc["q_parameters"]["epsilon_decay"];
-
-  Serial.println("Extracted Q-learning parameters:");
-  Serial.print("alpha: ");
-  Serial.print(q_alpha);
-  Serial.print(", gamma: ");
-  Serial.print(q_gamma);
-  Serial.print(", epsilon: ");
-  Serial.print(q_epsilon);
-  Serial.print(", epsilonDecay: ");
-  Serial.println(q_epsilonDecay);
-  Serial.flush();
-
-  int current_episode = doc["current_episode"];
-  float accumulated_reward = doc["accumulated_reward"];
-  float total_time = doc["total_time"];
-
-  Serial.println("Extracted episode information:");
-  Serial.print("Current episode: ");
-  Serial.print(current_episode);
-  Serial.print(", Accumulated reward: ");
-  Serial.print(accumulated_reward);
-  Serial.print(", Total time: ");
-  Serial.println(total_time);
-  Serial.flush();
-
-  JsonArray episodes = doc["episodes"];
-  for (JsonObject episode : episodes) {
-    int episode_number = episode["episode_number"];
-    float reward = episode["reward"];
-    float time = episode["time"];
-
-    Serial.println("Processing episode:");
-    Serial.print("Episode number: ");
-    Serial.print(episode_number);
-    Serial.print(", Reward: ");
-    Serial.print(reward);
-    Serial.print(", Time: ");
-    Serial.println(time);
-    Serial.flush();
-
-    JsonArray steps = episode["steps"];
-    for (JsonObject step : steps) {
-      int hop = step["hop"];
-      String node_from = step["node_from"];
-      String node_to = String(mesh.getNodeId());
-
-      Serial.println("Processing step:");
-      Serial.print("Hop: ");
-      Serial.print(hop);
-      Serial.print(", Node from: ");
-      Serial.print(node_from);
-      Serial.print(", Node to: ");
-      Serial.println(node_to);
-      Serial.flush();
-
-      // Add reward to episode
-      episode["reward"] = reward - 1; // This node is not master!
-      Serial.println("This node is not master! Reduce episode reward in 1");
-      Serial.flush();
-
-      // Update Q-Table
-      updateQTable(node_from, node_to, episode["reward"], q_alpha, q_gamma, doc);
-
-      // Choose next action using epsilon-greedy policy
-      int next_action = chooseAction(mesh.getNodeId(), doc, q_epsilon);
-
-      Serial.print("Chosen next action: ");
-      Serial.println(next_action);
-      Serial.flush();
-
-      // Send updated message to the next hop
-      String updatedJsonString;
-      serializeJson(doc, updatedJsonString);
-      qTable = doc["q_table"];
-      sendMessageToNextHop(next_action, updatedJsonString);
+    if (error) {
+        Serial.print(F("deserializeJson() failed: "));
+        Serial.println(error.c_str());
+        Serial.flush();
+        return;
     }
-  }
+
+    // Check if the message has all the learning data
+    if (isHopMessage(doc)) {
+        // Extract q-learning parameters and state information
+        float q_alpha = doc["q_parameters"]["alpha"];
+        float q_gamma = doc["q_parameters"]["gamma"];
+        float q_epsilon = doc["q_parameters"]["epsilon"];
+        float q_epsilonDecay = doc["q_parameters"]["epsilon_decay"];
+
+        Serial.println("Extracted Q-learning parameters:");
+        Serial.print("alpha: ");
+        Serial.print(q_alpha);
+        Serial.print(", gamma: ");
+        Serial.print(q_gamma);
+        Serial.print(", epsilon: ");
+        Serial.print(q_epsilon);
+        Serial.print(", epsilonDecay: ");
+        Serial.println(q_epsilonDecay);
+        Serial.flush();
+
+        int current_episode = doc["current_episode"];
+        float accumulated_reward = doc["accumulated_reward"];
+        float total_time = doc["total_time"];
+
+        Serial.println("Extracted episode information:");
+        Serial.print("Current episode: ");
+        Serial.print(current_episode);
+        Serial.print(", Accumulated reward: ");
+        Serial.print(accumulated_reward);
+        Serial.print(", Total time: ");
+        Serial.println(total_time);
+        Serial.flush();
+
+        JsonArray episodes = doc["episodes"];
+        for (JsonObject episode : episodes) {
+            int episode_number = episode["episode_number"];
+            float reward = episode["reward"];
+            float time = episode["time"];
+
+            Serial.println("Processing episode:");
+            Serial.print("Episode number: ");
+            Serial.print(episode_number);
+            Serial.print(", Reward: ");
+            Serial.print(reward);
+            Serial.print(", Time: ");
+            Serial.println(time);
+            Serial.flush();
+
+            JsonArray steps = episode["steps"];
+            for (JsonObject step : steps) {
+                int hop = step["hop"];
+                String node_from = step["node_from"];
+                String node_to = String(mesh.getNodeId());
+
+                Serial.println("Processing step:");
+                Serial.print("Hop: ");
+                Serial.print(hop);
+                Serial.print(", Node from: ");
+                Serial.print(node_from);
+                Serial.print(", Node to: ");
+                Serial.println(node_to);
+                Serial.flush();
+
+                // Add reward to episode
+                episode["reward"] = reward - 1; // This node is not master!
+                Serial.println("This node is not master! Reduce episode reward in 1");
+                Serial.flush();
+
+                // Update Q-Table
+                updateQTable(node_from, node_to, episode["reward"], q_alpha, q_gamma, doc);
+
+                // Choose next action using epsilon-greedy policy
+                int next_action = chooseAction(mesh.getNodeId(), doc, q_epsilon);
+
+                Serial.print("Chosen next action: ");
+                Serial.println(next_action);
+                Serial.flush();
+
+                // Send updated message to the next hop
+                String updatedJsonString;
+                serializeJson(doc, updatedJsonString);
+                qTable = doc["q_table"];
+                sendMessageToNextHop(next_action, updatedJsonString);
+            }
+        }
+    } 
+    // Message is a q_table update broadcast
+    else if (doc.is<JsonObject>()) {
+        Serial.println("Received Q-Table update:");
+
+        for (JsonPair kv : doc.as<JsonObject>()) {
+            const char* node_id = kv.key().c_str();
+            JsonObject q_values = kv.value().as<JsonObject>();
+
+            Serial.print("Node ID: ");
+            Serial.println(node_id);
+
+            for (JsonPair q_value : q_values) {
+                const char* neighbor_id = q_value.key().c_str();
+                float value = q_value.value().as<float>();
+
+                Serial.print("Neighbor ID: ");
+                Serial.print(neighbor_id);
+                Serial.print(" Value: ");
+                Serial.println(value);
+            }
+        }
+        Serial.flush();
+
+        qTable = doc;
+    } else {
+      Serial.println("Unknown message structure");
+      Serial.flush();
+    }
 }
 
 void updateQTable(String state_from, String state_to, float reward, float alpha, float gamma, JsonDocument& doc) {

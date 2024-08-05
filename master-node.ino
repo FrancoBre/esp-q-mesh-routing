@@ -39,7 +39,6 @@ String path = "";
 void receivedCallback(uint32_t from, String &msg);
 void updateQTable(String state_from, String state_to, float reward, float alpha, float gamma, JsonDocument& doc);
 void sendMessageToServer(String &msg);
-void formatPath(String& p);
 
 void newConnectionCallback(uint32_t nodeId) {
   Serial.print("--> startHere: New Connection, nodeId = ");
@@ -147,17 +146,19 @@ void receivedCallback(uint32_t from, String &msg) {
       // Update Q-Table
       updateQTable(node_from, node_to, episode["reward"], q_alpha, q_gamma, doc);
 
-      // TODO broadcast updated q table
       String updatedJsonString;
       serializeJson(doc, updatedJsonString);
-      qTable = doc["q_table"];
 
       // print learning results so the middleware catches them and sends it over 
       // to the server
       Serial.print("Log message with structure: ");
       Serial.println(updatedJsonString);
-      //formatPath(path);
-      //sendLearningDataToServer(path, updatedJsonString);
+
+      // broadcast the final learning data for this episode to all nodes
+      qTable = doc["q_table"];
+      String qTableString;
+      serializeJsonPretty(qTable, qTableString);
+      mesh.sendBroadcast(qTableString);
     }
   }
 }
@@ -226,44 +227,6 @@ void updateQTable(String state_from, String state_to, float reward, float alpha,
   serializeJsonPretty(q_table, Serial);
   Serial.println();
   Serial.flush();
-}
-
-void sendLearningDataToServer(String path, String learningData) {
-  Serial.print("Sending final q-learning information to server ");
-  Serial.print(": ");
-  Serial.println(path);
-  Serial.flush();
-
-  bool wifiConnected = (WiFi.status() == WL_CONNECTED);
-  Serial.println(wifiConnected);
-  
-  if (WiFi.status() == WL_CONNECTED) {
-    // IPAddress subnetMask = WiFi.subnetMask();
-    // IPAddress gatewayIP = WiFi.gatewayIP();
-
-    // uint32_t subnetMaskRaw = (uint32_t)subnetMask;
-    // uint32_t gatewayIPRaw = (uint32_t)gatewayIP;
-
-    // uint32_t broadcastIPRaw = ~subnetMaskRaw | gatewayIPRaw;
-    // IPAddress broadcastIp(broadcastIPRaw);
-    //
-    //IPAddress broadcastIp = ~WiFi.subnetMask() | WiFi.gatewayIP();
-    IPAddress broadcastIp;
-    broadcastIp = (~uint32_t(WiFi.subnetMask())) | uint32_t(WiFi.gatewayIP());
-
-    Serial.print("Calculated broadcast IP: ");
-    Serial.println(broadcastIp.toString());
-
-    udp.beginPacket(broadcastIp, 12345);
-    //udp.write(reinterpret_cast<const uint8_t *>(learningData.c_str()), learningData.length());
-    udp.write("Hello World");
-    udp.endPacket();
-  }
-}
-
-void formatPath(String& p) {
-  // String serverUrl = "https://api.thingspeak.com/update?api_key=" + String(THING_SPEAK_API_KEY) + "&field1=" + tsData;
-  p = "192.168.1.56:5000/data";
 }
 
 void setup() {
