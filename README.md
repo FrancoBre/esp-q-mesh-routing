@@ -1,6 +1,6 @@
 # Mesh Routing with Q-Learning
 
-This project implements a mesh routing simulation using Q-Learning. The goal is to solve a routing problem in a mesh network using reinforcement learning, implemented with ESP devices. The main objective is to optimize the route from a `sender node`, streaming sensor data obtained with a DHT11 to a `master node` (which is the node that's connected to a server, which is connected to a router), minimizing the number of hops required to reach it.
+This project implements a mesh network routing system using Q-Learning. The goal is to solve a routing problem in a mesh network using reinforcement learning, implemented with ESP devices. The main objective is to optimize the route from a `sender node`, streaming sensor data obtained with a DHT11 to a `master node` (which is the node that's connected to a server, which is connected to a router), minimizing the number of hops required to reach it.
 
 ![infrastructure (1)](https://github.com/user-attachments/assets/3d4fac86-66f3-4d0a-aa06-6f3a00470c4f)
 
@@ -10,7 +10,7 @@ The actions in the Q-table will consist of sending the packet to one of the neig
 
 ## How does the learning works
 
-The learning process in this project is based on Q-Learning, a type of reinforcement learning algorithm. Here’s a step-by-step explanation of how it works:
+Here’s a step-by-step explanation of how the learning process works:
 
 1. **Initialization**: 
    - Each node starts with an empty Q-table. The Q-table maps states (neighboring nodes) to actions (hops to neighboring nodes) with corresponding Q-values.
