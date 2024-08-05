@@ -8,7 +8,7 @@ Each ESP device will be flashed with software to handle packet reception and tra
 
 The actions in the Q-table will consist of sending the packet to one of the neighboring nodes. At each hop, the Q-table will be updated using an ε-greedy algorithm. The reward for the algorithm will be -1 for each hop that does not reach the master node and +100 when the node is reached. This way, we aim to optimize the use of the mesh network by minimizing the number of hops required to reach the central server.
 
-## How does the learning works
+## How does the learning work
 
 Here’s a step-by-step explanation of how the learning process works:
 
