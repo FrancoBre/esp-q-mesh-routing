@@ -2,7 +2,7 @@
 
 This project implements a mesh routing simulation using Q-Learning. The goal is to solve a routing problem in a mesh network using reinforcement learning, implemented with ESP devices. The main objective is to optimize the route from a `sender node`, streaming sensor data obtained with a DHT11 to a `master node` (which is the node that's connected to a server, which is connected to a router), minimizing the number of hops required to reach it.
 
-![image](https://github.com/user-attachments/assets/d9371557-b2e9-4fd2-b2c3-125ec6be4d99)
+![infrastructure (1)](https://github.com/user-attachments/assets/3d4fac86-66f3-4d0a-aa06-6f3a00470c4f)
 
 Each ESP device will be flashed with software to handle packet reception and transmission in the mesh network, and to implement the Q-Learning algorithm. Each time an ESP receives a packet, it will update the Q-table, which has states defined by the current node and the set of neighboring nodes (obtained through the ESP-MESH library).
 
@@ -38,13 +38,13 @@ The learning process in this project is based on Q-Learning, a type of reinforce
    - When the hop reaches the master node, the master node broadcasts the updated Q-table to all nodes in the network.
    - This ensures all nodes have the latest learning results, allowing them to make informed decisions on the best hop.
 
-![sender-intermediate-master](https://github.com/user-attachments/assets/333d15a1-0024-4dc8-8736-cda90c4baf9e)
+![sender-intermediate-master](https://github.com/user-attachments/assets/af65e433-a2b9-45f8-bbc7-f9211c1d41ca)
 
 6. **Middleware and Server**:
    - A middleware script running on a PC reads the serial monitor output from the master node and sends relevant learning results to a server.
    - The server receives learning data, logs it, and visualizes it in a web interface for analysis.
 
-![sender-intermediate-master](https://github.com/user-attachments/assets/34b3e0a0-54af-4ac1-a5fa-1b401833fbce)
+![master-middleware-server](https://github.com/user-attachments/assets/2738826d-d479-40a9-b36d-fa9a73e2d3a7)
 
 This setup ensures that all nodes in the network have the latest learning results, allowing them to make informed decisions on the best hop to optimize packet routing.
 
