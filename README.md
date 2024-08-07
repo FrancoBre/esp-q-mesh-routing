@@ -43,6 +43,48 @@ Here’s a step-by-step explanation of how the learning process works:
 
 This setup ensures that all nodes in the network have the latest learning results, allowing them to make informed decisions on the best hop to optimize packet routing.
 
+## Message structure
+
+Messages sent across nodes have the following structure:
+
+```json
+{
+    "current_node_id": "434939008",
+    "q_parameters": {
+        "alpha": "0.1",
+        "gamma": "0.9",
+        "epsilon": "0.1",
+        "epsilon_decay": "0.1"
+    },
+    "current_episode": 1,
+    "accumulated_reward": 0,
+    "total_time": 0,
+    "episodes": [
+        {
+            "episode_number": 1,
+            "reward": "0100",
+            "time": 0,
+            "steps": [
+                {
+                    "hop": 0,
+                    "node_from": "434939008"
+                }
+            ]
+        }
+    ],
+    "q_table": {
+        "434939008": {
+            "434960473": 10
+        },
+        "434960473": {
+            "434939008": 0
+        }
+    }
+}
+```
+
+Where `434939008` and `434960473` are the nodes in the network, and the actions are to hop to node `434939008` and `434960473` respectively.
+
 ## Setup
 
 \>1 ESP8266 devices are required for the mesh network:
