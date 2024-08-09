@@ -4,11 +4,11 @@ This project implements a mesh network routing system using Q-Learning. The goal
 
 ![infrastructure (1)](https://github.com/user-attachments/assets/3d4fac86-66f3-4d0a-aa06-6f3a00470c4f)
 
-Each ESP device will be flashed with software to handle packet reception and transmission in the mesh network, and to implement the Q-Learning algorithm. Each time an ESP receives a packet, it will update the Q-table, which has states defined by the current node and the set of neighboring nodes (obtained through the ESP-MESH library).
+Each ESP device will be flashed with software to handle packet reception and transmission in the mesh network, and to implement the Q-Learning algorithm. Each time an ESP receives a packet, it will update the Q-table, which has states defined by the current node and the set of neighboring nodes (obtained through the painlessMesh library).
 
 The actions in the Q-table will consist of sending the packet to one of the neighboring nodes. At each hop, the Q-table will be updated using an ε-greedy algorithm. The reward for the algorithm will be -1 for each hop that does not reach the master node and +100 when the node is reached. This way, we aim to optimize the use of the mesh network by minimizing the number of hops required to reach the central server.
 
-## How does the learning works
+## How does the learning work
 
 Here’s a step-by-step explanation of how the learning process works:
 
@@ -23,12 +23,7 @@ Here’s a step-by-step explanation of how the learning process works:
      - **Explore (epsilon)**: Randomly choose a neighboring node to explore new paths.
 
 3. **Updating the Q-table**: 
-   - Each time a hop is forwarded, the Q-table is updated.
-   - The Q-value is updated using the formula: 
-     \[
-     Q(s, a) = Q(s, a) + \alpha \left( r + \gamma \max_a Q(s', a') - Q(s, a) \right)
-     \]
-     where \( s \) is the current state, \( a \) is the action taken, \( r \) is the reward, \( s' \) is the next state, and \( a' \) is the next action.
+   - Each time a hop is forwarded, the Q-table is updated using the bellman equation.
 
 4. **Reward System**: 
    - For every hop that does not reach the master node, the node receives a reward of -1.
@@ -47,6 +42,48 @@ Here’s a step-by-step explanation of how the learning process works:
 ![master-middleware-server](https://github.com/user-attachments/assets/2738826d-d479-40a9-b36d-fa9a73e2d3a7)
 
 This setup ensures that all nodes in the network have the latest learning results, allowing them to make informed decisions on the best hop to optimize packet routing.
+
+## Message structure
+
+Messages sent across nodes have the following structure:
+
+```json
+{
+    "current_node_id": "434939008",
+    "q_parameters": {
+        "alpha": "0.1",
+        "gamma": "0.9",
+        "epsilon": "0.1",
+        "epsilon_decay": "0.1"
+    },
+    "current_episode": 1,
+    "accumulated_reward": 0,
+    "total_time": 0,
+    "episodes": [
+        {
+            "episode_number": 1,
+            "reward": "0100",
+            "time": 0,
+            "steps": [
+                {
+                    "hop": 0,
+                    "node_from": "434939008"
+                }
+            ]
+        }
+    ],
+    "q_table": {
+        "434939008": {
+            "434960473": 10
+        },
+        "434960473": {
+            "434939008": 0
+        }
+    }
+}
+```
+
+Where `434939008` and `434960473` are the nodes in the network, and the actions are to hop to node `434939008` and `434960473` respectively.
 
 ## Setup
 
