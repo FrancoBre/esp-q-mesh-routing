@@ -56,10 +56,6 @@ void nodeTimeAdjustedCallback(int32_t offset) {
   Serial.println(offset);
 }
 
-// TODO aca tendríamos que setear la recompensa a +100 y mandar un broadcast a todos los
-//  nodos de la red para que actualicen su q table
-//  para eso tenemos que implementar que cuando los nodos reciban un mensaje, puedan di-
-//  ferenciar si es un mensaje normal, de otro nodo, o un mensaje broadcast del nodo master
 void receivedCallback(uint32_t from, String &msg) {
   Serial.print("startHere: Received from ");
   Serial.print(from);
@@ -230,7 +226,7 @@ void updateQTable(String state_from, String state_to, float reward, float alpha,
 }
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(9600);
   // Serial.setDebugOutput(true);
   Serial.println();
   Serial.println();
@@ -248,7 +244,8 @@ void setup() {
 
   // Channel set to 6. Make sure to use the same channel for your mesh and for you other
   // network (STATION_SSID)
-  mesh.init( MESH_PREFIX, MESH_PASSWORD, MESH_PORT, WIFI_AP_STA, 6 );
+  //mesh.init( MESH_PREFIX, MESH_PASSWORD, MESH_PORT, WIFI_AP_STA, 6 );
+  mesh.init( MESH_PREFIX, MESH_PASSWORD, MESH_PORT);
   // Setup over the air update support
   mesh.initOTAReceive("bridge");
 
