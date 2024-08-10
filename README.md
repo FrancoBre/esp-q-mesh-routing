@@ -49,6 +49,10 @@ Messages sent across nodes have the following structure:
 
 ```json
 {
+    "payload": {
+       "tem": 28.1,
+       "hum": 70.2
+    }
     "current_node_id": "434939008",
     "q_parameters": {
         "alpha": "0.1",
