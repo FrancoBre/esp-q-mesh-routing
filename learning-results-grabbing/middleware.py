@@ -4,7 +4,7 @@ import json
 import time
 
 serial_port = '/dev/ttyUSB0'
-baud_rate = 115200
+baud_rate = 9600
 server_url = 'http://localhost:5000/data'
 log_file_path = 'learning_results_log.txt'
 
@@ -61,6 +61,7 @@ while True:
             if log_data:
                 log_to_file(line)  # Loguea solo los resultados del aprendizaje
                 send_to_server(log_data)  # Función para enviar los datos al servidor
+        print(line)
 
     # Reintentar abrir el puerto serial si se desconecta
     if not ser.is_open:

@@ -17,6 +17,8 @@ String q_gamma = "0.9";  // Discount factor
 String q_epsilon = "0.1";  // Exploration rate
 String q_epsilonDecay = "0.1";  // Exploration rate
 
+int currentEpisode = 1;
+
 Scheduler userScheduler; // to control your personal task
 painlessMesh mesh;
 DHT dht(DPIN,DTYPE);
@@ -48,7 +50,7 @@ void sendMessage() {
   q_parameters["epsilon"] = q_epsilon;
   q_parameters["epsilon_decay"] = q_epsilonDecay;
 
-  doc["current_episode"] = 1;
+  doc["current_episode"] = currentEpisode;
   doc["accumulated_reward"] = 0.0;
   doc["total_time"] = 0.0;
 
@@ -85,7 +87,6 @@ void sendMessage() {
   //taskSendMessage.setInterval(TASK_SECOND * 1);
   return;
 }
-
 
 bool isHopMessage(StaticJsonDocument<1024> doc) {
   return doc.containsKey("current_node_id") && doc.containsKey("q_parameters")
@@ -198,28 +199,13 @@ void receivedCallback(uint32_t from, String &msg) {
     } 
     // Message is a q_table update broadcast
     else if (doc.is<JsonObject>()) {
-        Serial.println("Received Q-Table update:");
-
-        for (JsonPair kv : doc.as<JsonObject>()) {
-            const char* node_id = kv.key().c_str();
-            JsonObject q_values = kv.value().as<JsonObject>();
-
-            Serial.print("Node ID: ");
-            Serial.println(node_id);
-
-            for (JsonPair q_value : q_values) {
-                const char* neighbor_id = q_value.key().c_str();
-                float value = q_value.value().as<float>();
-
-                Serial.print("Neighbor ID: ");
-                Serial.print(neighbor_id);
-                Serial.print(" Value: ");
-                Serial.println(value);
-            }
-        }
-        Serial.flush();
-
-        qTable = doc;
+      Serial.println("Received Q-Table update:");
+      serializeJsonPretty(doc, Serial);
+      currentEpisode++;
+      Serial.println("");
+      Serial.print("Episode number increased to ");
+      Serial.println(currentEpisode);
+      qTable = doc;
     } else {
       Serial.println("Unknown message structure");
       Serial.flush();
@@ -314,48 +300,41 @@ int chooseAction(int state, JsonDocument& doc, float epsilon) {
 
     if (isFirstTime) {
         Serial.println("Populating QTable for the first time");
-        StaticJsonDocument<1024> doc;
-        JsonObject q_table = doc.createNestedObject("q_table");
 
         // Asegurarse de que cada estado tiene un objeto dentro de la Q-table
         for (auto &&id : nodes) {
-            JsonObject stateObj = q_table.createNestedObject(String(state)); // Cambio aquí
-            for (auto &&action : nodes) {
-                stateObj[String(action)] = 0.0; // Inicializar valores Q para cada acción
+            if (!qTable["q_table"].containsKey(String(state))) {
+                JsonObject stateObj = qTable["q_table"].createNestedObject(String(state));
+                for (auto &&action : nodes) {
+                    stateObj[String(action)] = 0.0; // Inicializar valores Q para cada acción
+                }
             }
         }
 
-        String jsonString;
-        serializeJsonPretty(doc, jsonString);
-        Serial.println(jsonString);
-        qTable = doc;
+        serializeJsonPretty(qTable["q_table"], Serial);
         isFirstTime = false;
     } else {
-        Serial.println("");
         Serial.println("Updating QTable with missing neighbors");
-        JsonObject q_table = qTable["q_table"];
-
-        // Asegurarse de que el estado actual tiene un objeto dentro de la Q-table
-        if (!q_table.containsKey(String(state))) {
-            JsonObject stateObj = q_table.createNestedObject(String(state));
-            for (auto &&action : nodes) {
-                stateObj[String(action)] = 0.0; // Inicializar valores Q para cada acción
-            }
-        }
 
         // Verificar si los vecinos están en la Q-table para el estado actual
-        JsonObject stateObj = q_table[String(state)];
-        for (auto &&id : nodes) {
-            if (!stateObj.containsKey(String(id))) {
-                Serial.print("Adding missing action for neighbor ");
-                Serial.println(String(id));
-                stateObj[String(id)] = 0.0; // Inicializar valor Q para la acción faltante
+        if (!qTable.containsKey(String(state))) {
+            for (auto &&id : nodes) {
+                if (!qTable[String(state)].containsKey(String(id))) {
+                    Serial.print("Adding missing action for neighbor ");
+                    Serial.println(String(id));
+                    qTable[String(state)][String(id)] = 0.0; // Inicializar valor Q para la acción faltante
+                }
             }
+      
+        } else {
+          Serial.print("State ");
+          Serial.println(String(state));
+          Serial.print(" not found in Q-table: ");
+          serializeJsonPretty(qTable, Serial);
+          return -1;
         }
 
-        String jsonString;
-        serializeJsonPretty(qTable, jsonString);
-        Serial.println(jsonString);
+        serializeJsonPretty(qTable, Serial);
     }
 
     Serial.flush();
@@ -366,9 +345,9 @@ int chooseAction(int state, JsonDocument& doc, float epsilon) {
     Serial.println(nodesStr);
     Serial.flush();
 
-    if (random() < epsilon) {
+    if (random(0, 100) < epsilon * 100) {
         // Explorar
-        int action_index = random(0, num_neighbors - 1);
+        int action_index = random(0, num_neighbors);
         int action = neighbors[action_index];
         Serial.println("Exploring action");
         Serial.println(action);
@@ -376,63 +355,64 @@ int chooseAction(int state, JsonDocument& doc, float epsilon) {
         return action;
     } else {
         // Explotar: elegir la acción con el valor Q más alto
-        JsonObject q_table = qTable["q_table"];
-        if (!q_table.containsKey(String(state))) {
-            Serial.print("No Q-values found for state ");
-            Serial.println(String(state));
-            Serial.flush();
-            return -1;
-        }
-
-        // Asegurarse de que todos los vecinos están en la Q-table para este estado
-        JsonObject actions = q_table[String(state)];
-        for (auto &&neighbor : neighbors) {
-            if (!actions.containsKey(String(neighbor))) {
-                Serial.print("Adding missing action for neighbor ");
-                Serial.println(neighbor);
-                actions[String(neighbor)] = 0.0; // Inicializar Q-value para la acción faltante
-            }
-        }
-
-        Serial.println("Available actions are:");
-        String jsonActions;
-        serializeJsonPretty(actions, jsonActions);
-        Serial.println(jsonActions);
+        Serial.println("Starting exploitation phase...");
+        Serial.flush();
 
         float best_value = -1.0;
         String best_action = "";
-        Serial.println("Starting exploitation phase...");
-        Serial.flush();
+
+        JsonObject actions = qTable[String(state)];
+
+         /*
+        if(actions.isnull()) {
+          actions = qtable["q_table"][string(state)];
+
+          serial.println("");
+          serial.println("mf q table again");
+          serial.println("");
+
+          serial.println("");
+          serializejsonpretty(qtable["q_table"], serial);
+          serial.println("");
+
+          serial.println("");
+          serial.println("mf actions again");
+          Serial.println("");
+
+          Serial.println("");
+          serializeJsonPretty(actions, Serial);
+          Serial.println("");
+        }
+        */
+
         for (JsonPair kv : actions) {
             String action = kv.key().c_str();
             float value = kv.value().as<float>();
             uint32_t action_int = action.toInt();
+
             Serial.print("Checking action: ");
             Serial.print(action.c_str());
             Serial.print(" with value ");
             Serial.println(value);
             Serial.flush();
+
             if (value > best_value && std::find(neighbors.begin(), neighbors.end(), action_int) != neighbors.end()) {
-                Serial.print("Action ");
-                Serial.print(action.c_str());
-                Serial.print(" is a valid neighbor and has a better value ");
-                Serial.println(value);
-                Serial.flush();
                 best_value = value;
                 best_action = action;
-            } else {
-                Serial.print("Action ");
-                Serial.print(action.c_str());
-                Serial.println(" is not valid or does not have a better value");
-                Serial.flush();
             }
         }
-        Serial.print("Exploiting best action: ");
-        Serial.print(best_action.c_str());
-        Serial.print(" with value ");
-        Serial.println(best_value);
-        Serial.flush();
-        return best_action.toInt();
+
+        if (best_action != "") {
+            Serial.print("Exploiting best action: ");
+            Serial.print(best_action.c_str());
+            Serial.print(" with value ");
+            Serial.println(best_value);
+            Serial.flush();
+            return best_action.toInt();
+        } else {
+            Serial.println("No valid action found");
+            return -1;
+        }
     }
 }
 
