@@ -325,13 +325,6 @@ int chooseAction(int state, JsonDocument& doc, float epsilon) {
                     qTable[String(state)][String(id)] = 0.0; // Inicializar valor Q para la acción faltante
                 }
             }
-      
-        } else {
-          Serial.print("State ");
-          Serial.println(String(state));
-          Serial.print(" not found in Q-table: ");
-          serializeJsonPretty(qTable, Serial);
-          return -1;
         }
 
         serializeJsonPretty(qTable, Serial);
