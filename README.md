@@ -52,8 +52,8 @@ Messages sent across nodes have the following structure:
     "payload": {
        "tem": 28.1,
        "hum": 70.2
-    }
-    "current_node_id": "434939008",
+    },
+    "current_node_id": "434960473",
     "q_parameters": {
         "alpha": "0.1",
         "gamma": "0.9",
@@ -72,6 +72,7 @@ Messages sent across nodes have the following structure:
                 {
                     "hop": 0,
                     "node_from": "434939008"
+                    "node_to": "434960473"
                 }
             ]
         }
@@ -91,10 +92,11 @@ Where `434939008` and `434960473` are the nodes in the network, and the actions 
 
 ## Setup
 
-\>1 ESP8266 devices are required for the mesh network:
+2 ESP8266 devices are required for the mesh network:
  - One `sender node`.
- - One or more than one `intermediate nodes`.
  - And a `master node`.
+
+Also, incorporate one or more than one `intermediate nodes` to the network as needed. The more intermediate nodes you have, the more useful the learning results will be.
 
 Flash `sender-node.ino`, `intermediate-node.ino` and `master-node.ino` respectively using Arduino IDE. Also, required dependencies are `painlessMesh`, `TaskScheduler`, `ArduinoJson` and `AsyncTCP`.
 There are plenty of tutorials online on how to program an ESP8266, but if you are too lazy to search, [here](https://www.youtube.com/watch?v=lQm3YKkXPNc)'s one.
