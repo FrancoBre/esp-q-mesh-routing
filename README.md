@@ -121,10 +121,14 @@ $ python3 middleware.py
 
 4. Plug the sender node and the intermediate nodes for the learning to start.
 
-Demo:
+Demo 1:
 [![Watch the video](https://raw.githubusercontent.com/FrancoBre/q-mesh-routing/master/assets/thumbnail.jpeg)](https://youtu.be/WYOyJp7k9bQ)
 
+Demo 2:
+[![Watch the video](https://github.com/user-attachments/assets/88dddd2a-fdf8-4cbd-a961-f1f22c596134)](https://youtu.be/fHp0AZggZRo)
 
 ## Next Steps
 
 Test with more nodes to tweak learning parameters, or create a simulation with more nodes to do so.
+
+Create a better demo.
