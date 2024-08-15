@@ -132,8 +132,14 @@ void receivedCallback(uint32_t from, String &msg) {
       Serial.flush();
 
       // Add reward to episode
-      episode["reward"] = episode["reward"] + 100; // Master node found!
+      //float updatedReward = episode["reward"] + 100.00; // Master node found!
+      // float updatedReward = episode["reward"] + 100; // Master node found!
+      //float updatedReward = ((double) episode["reward"]) + 100; // Master node found!
+      float updatedReward = ((float) episode["reward"]) + 100.00; // Master node found!
+      episode["reward"] = String(updatedReward);
       Serial.println("Master node found! Reward increased by 100");
+      Serial.print("Updated reward: ");
+      Serial.println(String(episode["reward"]));
       Serial.flush();
 
       // Update Q-Table
@@ -157,69 +163,66 @@ void receivedCallback(uint32_t from, String &msg) {
 }
 
 void updateQTable(String state_from, String state_to, float reward, float alpha, float gamma, JsonDocument& doc) {
-  auto nodes = mesh.getNodeList(true);
-  std::vector<int> neighbors;
-  String nodesStr;
-  int num_neighbors = 0;
+    auto nodes = mesh.getNodeList(true);
 
-  JsonObject q_table = doc["q_table"];
-  for (auto &&id : nodes) {
-    String node_from = String(id);
-    for (auto &&id_2 : nodes) {
-      String node_to = String(id_2);
+    JsonObject q_table = doc["q_table"];
+    for (auto &&id : nodes) {
+        String node_from = String(id);
+        for (auto &&id_2 : nodes) {
+            String node_to = String(id_2);
 
-      if (id_2 != id) {
-        if (!q_table.containsKey(node_from)) {
-          q_table.createNestedObject(node_from);
+            if (id_2 != id) {
+                if (!q_table.containsKey(node_from)) {
+                    q_table.createNestedObject(node_from);
+                }
+
+                if (!q_table[node_from].containsKey(node_to)) {
+                    q_table[node_from][node_to] = 0.0; // Initialize Q-value if not present
+                }
+            }
         }
+    }
 
-        if (!q_table[node_to].containsKey(node_to)) {
-          q_table[node_from][node_to] = 0.0; // Initialize Q-value if not present
+    Serial.println("Q-table:");
+    serializeJsonPretty(q_table, Serial);
+    Serial.flush();
+
+    // Ensure state_from exists in q_table
+    if (!q_table.containsKey(state_from)) {
+        q_table.createNestedObject(state_from);
+    }
+
+    // Ensure state_to exists in q_table[state_from]
+    if (!q_table[state_from].containsKey(state_to)) {
+        q_table[state_from][state_to] = 0.0; // Initialize Q-value if not present
+    }
+
+    // Retrieve Q-value to update
+    float currentQ = q_table[state_from][state_to].as<float>();
+
+    // Calculate maxQ for state_to
+    float maxQ = 0.0; // Start with zero if no actions are found
+    if (q_table.containsKey(state_to)) {
+        JsonObject actions = q_table[state_to];
+        for (JsonPair kv : actions) {
+            float value = kv.value().as<float>();
+            if (value > maxQ) {
+                maxQ = value;
+            }
         }
-      }
     }
-  }
 
-  Serial.println("Q-table:");
-  serializeJsonPretty(q_table, Serial);
-  Serial.flush();
+    // Apply Bellman equation to update Q-value
+    float updatedQ = currentQ + alpha * (reward + gamma * maxQ - currentQ);
 
-  // Ensure state_from exists in q_table
-  if (!q_table.containsKey(state_from)) {
-    q_table.createNestedObject(state_from);
-  }
+    // Update Q-value in q_table
+    q_table[state_from][state_to] = updatedQ;
 
-  // Ensure state_to exists in q_table[state_from]
-  if (!q_table[state_from].containsKey(state_to)) {
-    q_table[state_from][state_to] = 0.0; // Initialize Q-value if not present
-  }
-
-  // Retrieve Q-value to update
-  float currentQ = q_table[state_from][state_to].as<float>();
-
-  // Calculate maxQ for state_to
-  float maxQ = -9999.0; // Start with a very low value
-  if (q_table.containsKey(state_to)) {
-    JsonObject actions = q_table[state_to];
-    for (JsonPair kv : actions) {
-      float value = kv.value().as<float>();
-      if (value > maxQ) {
-        maxQ = value;
-      }
-    }
-  }
-
-  // Apply Bellman equation to update Q-value
-  float updatedQ = currentQ + alpha * (reward + gamma * maxQ - currentQ);
-
-  // Update Q-value in q_table
-  q_table[state_from][state_to] = updatedQ;
-
-  // Log updated Q-table
-  Serial.println("Updated Q-table:");
-  serializeJsonPretty(q_table, Serial);
-  Serial.println();
-  Serial.flush();
+    // Log updated Q-table
+    Serial.println("Updated Q-table:");
+    serializeJsonPretty(q_table, Serial);
+    Serial.println();
+    Serial.flush();
 }
 
 void setup() {
