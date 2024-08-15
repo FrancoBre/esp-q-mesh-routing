@@ -53,7 +53,7 @@ Messages sent across nodes have the following structure:
        "tem": 28.1,
        "hum": 70.2
     },
-    "current_node_id": "434939008",
+    "current_node_id": "434960473",
     "q_parameters": {
         "alpha": "0.1",
         "gamma": "0.9",
@@ -72,6 +72,7 @@ Messages sent across nodes have the following structure:
                 {
                     "hop": 0,
                     "node_from": "434939008"
+                    "node_to": "434960473"
                 }
             ]
         }
