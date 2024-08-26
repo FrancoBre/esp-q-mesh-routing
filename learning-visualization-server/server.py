@@ -20,7 +20,7 @@ def index():
     topology_html = "<p>No topology data available</p>"
     if data:
         # Añadir nodos y aristas basados en la q_table
-        q_table = data[-1]['q_table']
+        q_table =  data[-1]['q_table']
         for node_from, connections in q_table.items():
             G.add_node(node_from)
             for node_to in connections:
@@ -37,18 +37,18 @@ def index():
                 line=dict(width=2, color='#888'),
                 hoverinfo='none',
                 mode='lines'))
-
+            
         node_trace = go.Scatter(
-            x=[pos[node][0] for node in G.nodes()],
-            y=[pos[node][1] for node in G.nodes()],
-            text=list(G.nodes()),
-            mode='markers+text',
-            hoverinfo='text',
-            marker=dict(
-                showscale=False,
-                color='blue',
-                size=10,
-                line=dict(width=2)))
+        x=[pos[node][0] for node in G.nodes()],
+        y=[pos[node][1] for node in G.nodes()],
+        text=list(G.nodes()),
+        mode='markers+text',
+        hoverinfo='text',
+        marker=dict(
+            showscale=False,
+            color='blue',
+            size=10,
+            line=dict(width=2)))
 
         # Crear la figura y añadir las trazas
         fig2 = go.Figure(data=edge_trace + [node_trace])
@@ -67,7 +67,7 @@ def index():
             for ep in episodes:
                 episode_numbers.append(ep['episode_number'])
                 rewards.append(ep['reward'])
-
+        
         # Create the line plot
         if rewards and episode_numbers:
             fig = px.line(x=episode_numbers, y=rewards, labels={'x': 'Episode Number', 'y': 'Reward'}, title="Rewards per Episode")
@@ -110,6 +110,7 @@ def index():
     </head>
     <body>
         <h1>Learning Progress</h1>
+        {{ graph_html|safe }}
         <h2>Network Topology</h2>
         {{ topology_html|safe }}
         <h2>Rewards per Episode</h2>
