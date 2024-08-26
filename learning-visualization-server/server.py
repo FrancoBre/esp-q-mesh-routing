@@ -2,6 +2,8 @@ import json
 from flask import Flask, request, render_template_string
 import plotly.express as px
 import plotly.io as pio
+import plotly.graph_objs as go
+import networkx as nx
 
 LOG_FILE = 'received_data.log'
 
@@ -11,16 +13,65 @@ data = []  # Store the received JSON data
 @app.route('/')
 def index():
     global data
+    G = nx.Graph()
+    edge_trace = []
 
-    # Prepare data for the plot
-    graph_html = "<p>No data available</p>"
+    # Prepare data for the network topology plot
+    topology_html = "<p>No topology data available</p>"
     if data:
-        episodes = data[-1]['episodes']
-        episode_numbers = [ep['episode_number'] for ep in episodes]
-        rewards = [ep['reward'] for ep in episodes]
+        # Añadir nodos y aristas basados en la q_table
+        q_table = data[-1]['q_table']
+        for node_from, connections in q_table.items():
+            G.add_node(node_from)
+            for node_to in connections:
+                G.add_edge(node_from, node_to)
 
-        fig = px.line(x=episode_numbers, y=rewards, labels={'x': 'Episode', 'y': 'Reward'}, title='Rewards per Episode')
-        graph_html = pio.to_html(fig, full_html=False)
+        # Asignar posiciones arbitrarias para los nodos
+        pos = nx.spring_layout(G)  # Usa un layout automático de NetworkX
+
+        for edge in G.edges():
+            x0, y0 = pos[edge[0]]
+            x1, y1 = pos[edge[1]]
+            edge_trace.append(go.Scatter(
+                x=[x0, x1, None], y=[y0, y1, None],
+                line=dict(width=2, color='#888'),
+                hoverinfo='none',
+                mode='lines'))
+
+        node_trace = go.Scatter(
+            x=[pos[node][0] for node in G.nodes()],
+            y=[pos[node][1] for node in G.nodes()],
+            text=list(G.nodes()),
+            mode='markers+text',
+            hoverinfo='text',
+            marker=dict(
+                showscale=False,
+                color='blue',
+                size=10,
+                line=dict(width=2)))
+
+        # Crear la figura y añadir las trazas
+        fig2 = go.Figure(data=edge_trace + [node_trace])
+
+        # Convert the network topology graph to HTML
+        topology_html = pio.to_html(fig2, full_html=False)
+
+    # Prepare data for the rewards plot
+    rewards_html = "<p>No reward data available</p>"
+    if data:
+        # Extract rewards and episode numbers
+        rewards = []
+        episode_numbers = []
+        for entry in data:
+            episodes = entry.get('episodes', [])
+            for ep in episodes:
+                episode_numbers.append(ep['episode_number'])
+                rewards.append(ep['reward'])
+
+        # Create the line plot
+        if rewards and episode_numbers:
+            fig = px.line(x=episode_numbers, y=rewards, labels={'x': 'Episode Number', 'y': 'Reward'}, title="Rewards per Episode")
+            rewards_html = pio.to_html(fig, full_html=False)
 
     # Prepare data for the table
     table_html = "<p>No data available</p>"
@@ -59,12 +110,15 @@ def index():
     </head>
     <body>
         <h1>Learning Progress</h1>
-        {{ graph_html|safe }}
+        <h2>Network Topology</h2>
+        {{ topology_html|safe }}
+        <h2>Rewards per Episode</h2>
+        {{ rewards_html|safe }}
         <h2>Received Data</h2>
         {{ table_html|safe }}
     </body>
     </html>
-    ''', graph_html=graph_html, table_html=table_html)
+    ''', topology_html=topology_html, rewards_html=rewards_html, table_html=table_html)
 
 @app.route('/data', methods=['POST'])
 def receive_data():
