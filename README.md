@@ -41,7 +41,9 @@ Here’s a step-by-step explanation of how the learning process works:
    - A middleware script running on a PC reads the serial monitor output from the master node, tries to find the optimal Q-Parameters with a genetic algorithm and sends relevant learning results to a server.
    - The server receives learning data, logs it, and visualizes it in a web interface for analysis.
 
-![master-middleware-server](https://github.com/user-attachments/assets/2738826d-d479-40a9-b36d-fa9a73e2d3a7)
+![image](https://github.com/user-attachments/assets/34c1f5fb-ae6e-44ec-bc56-7ddf2e542efa)
+
+![image](https://github.com/user-attachments/assets/65875361-88aa-44a0-b7fa-ce49bf133b04)
 
 This setup ensures that all nodes in the network have the latest learning results, allowing them to make informed decisions on the best hop to optimize packet routing.
 
