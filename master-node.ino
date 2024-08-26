@@ -1,31 +1,45 @@
 /*
 * MASTER NODE
 */
+#include "IPAddress.h"
+#ifdef ESP8266
+#include "Hash.h"
+#include <ESPAsyncTCP.h>
+#else
+#include <AsyncTCP.h>
+#endif
+#include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
 #include <map>
 #include <vector>
 #include <random>
 #include "painlessMesh.h"
 #include <ESP8266WiFi.h>
-#include <ESP8266WiFiMulti.h>
-#include <ESP8266HTTPClient.h>
-#include <WiFiClient.h>
-#include <WiFiUdp.h>
+#include <ESPAsyncTCP.h>
+#include <ESPAsyncWebServer.h>
 
-ESP8266WiFiMulti WiFiMulti;
-
-#define   STATION_SSID     "Telecentro-40d5"     
-#define   STATION_PASSWORD "RTMHNMMHJMNK"        
+#define   STATION_SSID     "whateverYouLike"     
+#define   STATION_PASSWORD "somethingSneaky"        
+//#define   STATION_SSID     "Telecentro-40d5"     
+//#define   STATION_PASSWORD "RTMHNMMHJMNK"        
 //#define   STATION_SSID     "Speedy-Fibra-C19C2E" 
-//#define   STATION_PASSWORD "qazwsxed"            
-#define   STATION_PORT     5555
+//#define   STATION_PASSWORD "qazwsxed"   
+//#define STATION_SSID "TCH-3490222"
+//#define STATION_PASSWORD "5yG2nSZ3uuCC9MTBgY"
+#define STATION_PORT 5555
 
-#define   MESH_PREFIX         "whateverYouLike"
-#define   MESH_PASSWORD       "somethingSneaky"
-#define   MESH_PORT           5555
+#define MESH_PREFIX "whateverYouLike"
+#define MESH_PASSWORD "somethingSneaky"
+#define MESH_PORT 5555
+
+#define HOSTNAME "HTTP_BRIDGE"
 
 Scheduler userScheduler; // to control your personal task
 painlessMesh mesh;
+AsyncWebServer server(80);
+IPAddress myIP(0,0,0,0);
+IPAddress myAPIP(0,0,0,0);
+IPAddress getlocalIP();
 
 // save the most recent q table for sending data
 // with the latest learning data
@@ -34,8 +48,10 @@ JsonDocument qTable;
 String path = "";
 
 void receivedCallback(uint32_t from, String &msg);
-void updateQTable(String state_from, String state_to, float reward, float alpha, float gamma, JsonDocument& doc);
+void updateQTable(String state_from, String state_to, float reward, float alpha, float gamma, JsonDocument &doc);
 void sendMessageToServer(String &msg);
+void handleReceiveQParameters();
+IPAddress getlocalIP();
 
 void newConnectionCallback(uint32_t nodeId) {
   Serial.print("--> startHere: New Connection, nodeId = ");
@@ -54,12 +70,6 @@ void nodeTimeAdjustedCallback(int32_t offset) {
 }
 
 void receivedCallback(uint32_t from, String &msg) {
-  Serial.print("startHere: Received from ");
-  Serial.print(from);
-  Serial.print(" msg=");
-  Serial.println(msg);
-  Serial.flush();
-
   // Deserialize the JSON message
   StaticJsonDocument<1024> doc;
   DeserializationError error = deserializeJson(doc, msg);
@@ -76,17 +86,6 @@ void receivedCallback(uint32_t from, String &msg) {
   float q_gamma = doc["q_parameters"]["gamma"];
   float q_epsilon = doc["q_parameters"]["epsilon"];
   float q_epsilonDecay = doc["q_parameters"]["epsilon_decay"];
-
-  Serial.println("Extracted Q-learning parameters:");
-  Serial.print("alpha: ");
-  Serial.print(q_alpha);
-  Serial.print(", gamma: ");
-  Serial.print(q_gamma);
-  Serial.print(", epsilon: ");
-  Serial.print(q_epsilon);
-  Serial.print(", epsilonDecay: ");
-  Serial.println(q_epsilonDecay);
-  Serial.flush();
 
   int current_episode = doc["current_episode"];
   float accumulated_reward = doc["accumulated_reward"];
@@ -132,9 +131,6 @@ void receivedCallback(uint32_t from, String &msg) {
       Serial.flush();
 
       // Add reward to episode
-      //float updatedReward = episode["reward"] + 100.00; // Master node found!
-      // float updatedReward = episode["reward"] + 100; // Master node found!
-      //float updatedReward = ((double) episode["reward"]) + 100; // Master node found!
       float updatedReward = ((float) episode["reward"]) + 100.00; // Master node found!
       episode["reward"] = String(updatedReward);
       Serial.println("Master node found! Reward increased by 100");
@@ -148,21 +144,23 @@ void receivedCallback(uint32_t from, String &msg) {
       String updatedJsonString;
       serializeJson(doc, updatedJsonString);
 
-      // print learning results so the middleware catches them and sends it over 
+      // print learning results so the middleware catches them and sends it over
       // to the server
       Serial.print("Log message with structure: ");
       Serial.println(updatedJsonString);
 
       // broadcast the final learning data for this episode to all nodes
       qTable = doc["q_table"];
+      /*
       String qTableString;
       serializeJsonPretty(qTable, qTableString);
       mesh.sendBroadcast(qTableString);
+      */
     }
   }
 }
 
-void updateQTable(String state_from, String state_to, float reward, float alpha, float gamma, JsonDocument& doc) {
+void updateQTable(String state_from, String state_to, float reward, float alpha, float gamma, JsonDocument &doc) {
     auto nodes = mesh.getNodeList(true);
 
     JsonObject q_table = doc["q_table"];
@@ -232,24 +230,90 @@ void setup() {
   Serial.println();
   Serial.println();
   Serial.println();
-  Serial.println("Initializing MASTER NODE");
 
-  for (uint8_t t = 4; t > 0; t--) {
+  for (uint8_t t = 10; t > 0; t--) {
     Serial.printf("[SETUP] WAIT %d...\n", t);
     Serial.flush();
     delay(1000);
   }
 
-  mesh.setDebugMsgTypes( ERROR | STARTUP | CONNECTION );  // set before init() so that you can see startup messages
+  Serial.println("Initializing MASTER NODE");
 
-  mesh.init( MESH_PREFIX, MESH_PASSWORD, MESH_PORT);
+  mesh.setDebugMsgTypes(ERROR | STARTUP | CONNECTION);  // set before init() so that you can see startup messages
+
+  mesh.init(MESH_PREFIX, MESH_PASSWORD, MESH_PORT);
+
+  mesh.onReceive(&receivedCallback);
+
+  mesh.stationManual(STATION_SSID, STATION_PASSWORD);
+  mesh.setHostname(HOSTNAME);
 
   // Bridge node, should (in most cases) be a root node. See [the wiki](https://gitlab.com/painlessMesh/painlessMesh/wikis/Possible-challenges-in-mesh-formation) for some background
   mesh.setRoot(true);
   // This node and all other nodes should ideally know the mesh contains a root, so call this on all nodes
   mesh.setContainsRoot(true);
 
-  mesh.onReceive(&receivedCallback);
+  myAPIP = IPAddress(mesh.getAPIP());
+
+  Serial.println("");
+  Serial.println("----------------------------");
+  Serial.print("IP address: ");
+  Serial.println(myAPIP.toString());
+  Serial.println("Make sure to connect to the AP:");
+  Serial.print("STATION_SSID: ");
+  Serial.println(STATION_SSID);
+  Serial.print("STATION_PASSWORD: ");
+  Serial.println(STATION_PASSWORD);
+  Serial.println("----------------------------");
+
+  server.on("/update-q-parameters", HTTP_POST, [](AsyncWebServerRequest *request){
+      Serial.println("Received new Q-learning parameters:");
+
+      StaticJsonDocument<1024> doc;
+
+      if (request->hasParam("alpha", true)) {
+        String alpha;
+        alpha = request->getParam("alpha", true)->value();
+        doc["alpha"] = alpha;
+        Serial.print("alpha: ");
+        Serial.print(alpha);
+      } else {
+        request->send(400, "text/plain", "Error reading alpha from request");
+        return;
+      }
+
+      if (request->hasParam("gamma", true)) {
+        String gamma;
+        gamma = request->getParam("gamma", true)->value();
+        doc["gamma"] = gamma;
+        Serial.print(", gamma: ");
+        Serial.print(gamma);
+      } else {
+        request->send(400, "text/plain", "Error reading gamma from request");
+        return;
+      }
+
+      if (request->hasParam("epsilon", true)) {
+        String epsilon;
+        epsilon = request->getParam("epsilon", true)->value();
+        doc["epsilon"] = epsilon;
+        Serial.print(", epsilon: ");
+        Serial.println(epsilon);
+      } else {
+        request->send(400, "text/plain", "Error reading epsilon from request");
+        return;
+      }
+
+      // send over new calculated q parameters along with q table
+      doc["q_table"] = qTable;
+
+      String qParametersString;
+      serializeJsonPretty(doc, qParametersString);
+      mesh.sendBroadcast(qParametersString);
+
+      request->send(200, "application/json", "{\"status\":\"Parameters updated\"}");
+  });
+  server.begin();
 }
 
 void loop() {

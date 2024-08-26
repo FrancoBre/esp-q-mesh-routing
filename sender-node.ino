@@ -173,7 +173,10 @@ void receivedCallback(uint32_t from, String &msg) {
       Serial.println("");
       Serial.print("Episode number increased to ");
       Serial.println(currentEpisode);
-      qTable = doc;
+      qTable = doc["q_table"];
+      q_alpha = doc["alpha"];
+      q_gamma = doc["gamma"];
+      q_epsilon = doc["epsilon"];
     } else {
       Serial.println("Unknown message structure");
       Serial.flush();

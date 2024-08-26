@@ -115,28 +115,9 @@ void receivedCallback(uint32_t from, String &msg) {
     }
     // Message is a q_table update broadcast
     else if (doc.is<JsonObject>()) {
-        Serial.println("Received Q-Table update:");
-
-        for (JsonPair kv : doc.as<JsonObject>()) {
-            const char* node_id = kv.key().c_str();
-            JsonObject q_values = kv.value().as<JsonObject>();
-
-            Serial.print("Node ID: ");
-            Serial.println(node_id);
-
-            for (JsonPair q_value : q_values) {
-                const char* neighbor_id = q_value.key().c_str();
-                float value = q_value.value().as<float>();
-
-                Serial.print("Neighbor ID: ");
-                Serial.print(neighbor_id);
-                Serial.print(" Value: ");
-                Serial.println(value);
-            }
-        }
-        Serial.flush();
-
-        qTable = doc;
+      Serial.println("Received Q-Table update:");
+      serializeJsonPretty(doc, Serial);
+      qTable = doc["q_table"];
     } else {
       Serial.println("Unknown message structure");
       Serial.flush();
@@ -370,7 +351,7 @@ void setup() {
   Serial.println();
   Serial.println("Initializing INTERMEDIATE NODE");
 
-  for (uint8_t t = 4; t > 0; t--) {
+  for (uint8_t t = 10; t > 0; t--) {
     Serial.printf("[SETUP] WAIT %d...\n", t);
     Serial.flush();
     delay(1000);

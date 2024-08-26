@@ -29,14 +29,16 @@ Here’s a step-by-step explanation of how the learning process works:
    - For every hop that does not reach the master node, the node receives a reward of -1.
    - When the hop reaches the master node, the node receives a reward of +100.
 
-5. **Broadcasting the Q-Table**:
-   - When the hop reaches the master node, the master node broadcasts the updated Q-table to all nodes in the network.
+5. **Finding and Broadcasting of Optimal Q-Parameters**:
+   - When the hop reaches the master node, the middleware reads the episode results and sends the current Q parameters (alpha, gamma, epsilon) to a genetic algorithm, in order to find the optimal parameters.
+   - Then, the middleware sends the Q parameters back to the master node, which then broadcasts the updated Q-table and the Q parameters to all nodes in the network.
+   - This is done for a number of episodes, to separate the learning phase from the exploitation phase.
    - This ensures all nodes have the latest learning results, allowing them to make informed decisions on the best hop.
 
 ![sender-intermediate-master](https://github.com/user-attachments/assets/af65e433-a2b9-45f8-bbc7-f9211c1d41ca)
 
 6. **Middleware and Server**:
-   - A middleware script running on a PC reads the serial monitor output from the master node and sends relevant learning results to a server.
+   - A middleware script running on a PC reads the serial monitor output from the master node, tries to find the optimal Q-Parameters with a genetic algorithm and sends relevant learning results to a server.
    - The server receives learning data, logs it, and visualizes it in a web interface for analysis.
 
 ![master-middleware-server](https://github.com/user-attachments/assets/2738826d-d479-40a9-b36d-fa9a73e2d3a7)
@@ -119,7 +121,11 @@ $ python3 middleware.py
 
 3. Plug the master node (the serial port device in the code is assumed to be `/dev/ttyUSB0`, change as needed).
 
-4. Plug the sender node and the intermediate nodes for the learning to start.
+4. Connect to the AP lifted by the master node with the following credentials: `STATION_SSID: whateverYouLike`, `STATION_PASSWORD: somethingSneaky`.
+
+5. Plug the sender node and the intermediate nodes for the learning to start.
+
+6. Enter the learning visualization server to analyze results: `http://localhost:5000`
 
 Demo 1:
 [![Watch the video](https://raw.githubusercontent.com/FrancoBre/q-mesh-routing/master/assets/thumbnail.jpeg)](https://youtu.be/WYOyJp7k9bQ)
