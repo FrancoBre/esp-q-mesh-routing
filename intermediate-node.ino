@@ -78,39 +78,55 @@ void receivedCallback(uint32_t from, String &msg) {
         JsonArray episodes = doc["episodes"];
         for (JsonObject episode : episodes) {
             int episode_number = episode["episode_number"];
-            float reward = episode["reward"];
-            float time = episode["time"];
+            if (episode_number == current_episode) {
+              float reward = episode["reward"];
+              float time = episode["time"];
 
-            // Add reward to episode
-            episode["reward"] = String(reward - 1.0); // This node is not master!
-            Serial.println("This node is not master! Reduce episode reward in 1");
-            Serial.println(String(episode["reward"]));
-            Serial.flush();
+              // Add reward to episode
+              episode["reward"] = String(reward - 1.0); // This node is not master!
+              Serial.println("This node is not master! Reduce episode reward in 1");
+              Serial.println(String(episode["reward"]));
+              Serial.flush();
 
-            // Choose next action using epsilon-greedy policy
-            int next_action = chooseAction(mesh.getNodeId(), doc, q_epsilon);
+              // Choose next action using epsilon-greedy policy
+              int next_action = chooseAction(mesh.getNodeId(), doc, q_epsilon);
 
-            if (next_action == -1) {
-              return;
+              if (next_action == -1) {
+                return;
+              }
+
+              JsonArray steps = episode["steps"];
+              int hop = steps.size();
+              
+              Serial.println("about to add the mf new hop to the steps array!");
+              Serial.flush();
+              // add the hop that's going to occur
+              JsonObject newHop = steps.createNestedObject();
+              newHop["hop"] = hop;
+              newHop["node_from"] = String(mesh.getNodeId());
+              newHop["node_to"] = String(next_action);
+              Serial.println("new hop added:");
+              serializeJson(newHop, Serial);
+              Serial.println();
+              Serial.println("steps with new hop:");
+              serializeJson(steps, Serial);
+              Serial.println();
+              Serial.println("episode with new hop:");
+              serializeJson(episode, Serial);
+              Serial.println();
+              Serial.println("whole object with new hop:");
+              serializeJson(doc, Serial);
+              Serial.flush();
+
+              // Update Q-Table for the current hop
+              updateQTable(newHop["node_to"], newHop["node_from"], episode["reward"], q_alpha, q_gamma, doc);
+
+              // Send updated message to the next hop
+              String updatedJsonString;
+              serializeJson(doc, updatedJsonString);
+              qTable = doc["q_table"];
+              sendMessageToNextHop(next_action, updatedJsonString);
             }
-
-            JsonArray steps = episode["steps"];
-            int hop = steps.size();
-            
-            // Crear el nuevo hop
-            JsonObject newHop = steps.createNestedObject();
-            newHop["hop"] = hop;
-            newHop["node_from"] = String(mesh.getNodeId());
-            newHop["node_to"] = String(next_action);
-
-            // Update Q-Table
-            updateQTable(newHop["node_from"], newHop["node_to"], episode["reward"], q_alpha, q_gamma, doc);
-
-            // Send updated message to the next hop
-            String updatedJsonString;
-            serializeJson(doc, updatedJsonString);
-            qTable = doc["q_table"];
-            sendMessageToNextHop(next_action, updatedJsonString);
         }
     }
     // Message is a q_table update broadcast
@@ -130,45 +146,47 @@ void updateQTable(String state_from, String state_to, float reward, float alpha,
   String nodesStr;
   int num_neighbors = 0;
 
-  JsonObject q_table = doc["q_table"];
+  //JsonObject q_table = doc["q_table"];
   for (auto &&id : nodes) {
     String node_from = String(id);
     for (auto &&id_2 : nodes) {
       String node_to = String(id_2);
 
       if (id_2 != id) {
-        if (!q_table.containsKey(node_from)) {
-          q_table.createNestedObject(node_from);
+        if (!doc["q_table"].containsKey(node_from)) {
+          doc["q_table"].createNestedObject(node_from);
         }
 
-        if (!q_table[node_to].containsKey(node_to)) {
-          q_table[node_from][node_to] = 0.0; // Initialize Q-value if not present
+        if (!doc["q_table"][node_to].containsKey(node_to)) {
+          doc["q_table"][node_from][node_to] = 0.0; // Initialize Q-value if not present
         }
       }
     }
   }
 
   Serial.println("Q-table:");
-  serializeJsonPretty(q_table, Serial);
+  serializeJsonPretty(doc["q_table"], Serial);
   Serial.flush();
 
   // Ensure state_from exists in q_table
-  if (!q_table.containsKey(state_from)) {
-    q_table.createNestedObject(state_from);
+  if (!doc["q_table"].containsKey(state_from)) {
+    doc["q_table"].createNestedObject(state_from);
   }
 
   // Ensure state_to exists in q_table[state_from]
-  if (!q_table[state_from].containsKey(state_to)) {
-    q_table[state_from][state_to] = 0.0; // Initialize Q-value if not present
+  if (!doc["q_table"][state_from].containsKey(state_to)) {
+    doc["q_table"][state_from][state_to] = 0.0; // Initialize Q-value if not present
   }
 
   // Retrieve Q-value to update
-  float currentQ = q_table[state_from][state_to].as<float>();
+  float currentQ = doc["q_table"][state_from][state_to].as<float>();
+  Serial.print("Current Q:");
+  Serial.println(String(currentQ));
 
   // Calculate maxQ for state_to
   float maxQ = -9999.0; // Start with a very low value
-  if (q_table.containsKey(state_to)) {
-    JsonObject actions = q_table[state_to];
+  if (doc["q_table"].containsKey(state_to)) {
+    JsonObject actions = doc["q_table"][state_to];
     for (JsonPair kv : actions) {
       float value = kv.value().as<float>();
       if (value > maxQ) {
@@ -179,13 +197,18 @@ void updateQTable(String state_from, String state_to, float reward, float alpha,
 
   // Apply Bellman equation to update Q-value
   float updatedQ = currentQ + alpha * (reward + gamma * maxQ - currentQ);
+  Serial.print("updatedQ :");
+  Serial.println(String(updatedQ));
 
   // Update Q-value in q_table
-  q_table[state_from][state_to] = updatedQ;
+  doc["q_table"][state_from][state_to] = updatedQ;
+
+  Serial.print("q_table with updated q:");
+  serializeJsonPretty(doc["q_table"], Serial);
 
   // Log updated Q-table
   Serial.println("Updated Q-table:");
-  serializeJsonPretty(q_table, Serial);
+  serializeJsonPretty(doc["q_table"], Serial);
   Serial.println();
   Serial.flush();
 }
@@ -231,18 +254,17 @@ int chooseAction(int state, JsonDocument& doc, float epsilon) {
     } else {
         Serial.println("");
         Serial.println("Updating QTable with missing neighbors");
-        JsonObject q_table = qTable["q_table"];
 
         // Asegurarse de que el estado actual tiene un objeto dentro de la Q-table
-        if (!q_table.containsKey(String(state))) {
-            JsonObject stateObj = q_table.createNestedObject(String(state));
+        if (!qTable["q_table"].containsKey(String(state))) {
+            JsonObject stateObj = qTable["q_table"].createNestedObject(String(state));
             for (auto &&action : nodes) {
                 stateObj[String(action)] = 0.0; // Inicializar valores Q para cada acción
             }
         }
 
         // Verificar si los vecinos están en la Q-table para el estado actual
-        JsonObject stateObj = q_table[String(state)];
+        JsonObject stateObj = qTable["q_table"][String(state)];
         for (auto &&id : nodes) {
             if (!stateObj.containsKey(String(id))) {
                 Serial.print("Adding missing action for neighbor ");
@@ -251,9 +273,7 @@ int chooseAction(int state, JsonDocument& doc, float epsilon) {
             }
         }
 
-        String jsonString;
-        serializeJsonPretty(qTable, jsonString);
-        Serial.println(jsonString);
+        serializeJsonPretty(qTable, Serial);
     }
 
     Serial.flush();
@@ -274,33 +294,36 @@ int chooseAction(int state, JsonDocument& doc, float epsilon) {
         return action;
     } else {
         // Explotar: elegir la acción con el valor Q más alto
-        JsonObject q_table = qTable["q_table"];
-        if (!q_table.containsKey(String(state))) {
+        if (!qTable["q_table"].containsKey(String(state))) {
             Serial.print("No Q-values found for state ");
             Serial.println(String(state));
+
+            Serial.println("in qTable:");
+            serializeJsonPretty(qTable, Serial);
+
+            Serial.println("in qTable['q_table'");
+            serializeJsonPretty(qTable["q_table"], Serial);
             Serial.flush();
             return -1;
         }
 
         // Asegurarse de que todos los vecinos están en la Q-table para este estado
-        JsonObject actions = q_table[String(state)];
         for (auto &&neighbor : neighbors) {
-            if (!actions.containsKey(String(neighbor))) {
+            if (!qTable["q_table"][String(state)].containsKey(String(neighbor))) {
                 Serial.print("Adding missing action for neighbor ");
                 Serial.println(neighbor);
-                actions[String(neighbor)] = 0.0; // Inicializar Q-value para la acción faltante
+                qTable["q_table"][String(state)][String(neighbor)] = 0.0; // Inicializar Q-value para la acción faltante
             }
         }
 
         Serial.println("Available actions are:");
-        String jsonActions;
-        serializeJsonPretty(actions, jsonActions);
-        Serial.println(jsonActions);
+        serializeJsonPretty(qTable["q_table"][String(state)], Serial);
 
         float best_value = -1.0;
         String best_action = "";
         Serial.println("Starting exploitation phase...");
         Serial.flush();
+        JsonObject actions = qTable["q_table"][String(state)];
         for (JsonPair kv : actions) {
             String action = kv.key().c_str();
             float value = kv.value().as<float>();

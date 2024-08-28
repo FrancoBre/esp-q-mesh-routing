@@ -26,6 +26,11 @@ DHT dht(DPIN,DTYPE);
 // save the most recent q table for sending data
 // with the latest learning data
 JsonDocument qTable;
+
+// save the most recent q table for sending data
+// with the latest learning data
+JsonDocument episodes;
+
 bool isFirstTime = true;
 
 // User stub
@@ -177,6 +182,8 @@ void receivedCallback(uint32_t from, String &msg) {
       q_alpha = doc["alpha"];
       q_gamma = doc["gamma"];
       q_epsilon = doc["epsilon"];
+
+      episodes = doc["episodes"];
     } else {
       Serial.println("Unknown message structure");
       Serial.flush();
