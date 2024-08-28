@@ -103,59 +103,69 @@ void receivedCallback(uint32_t from, String &msg) {
   JsonArray episodes = doc["episodes"];
   for (JsonObject episode : episodes) {
     int episode_number = episode["episode_number"];
-    float reward = episode["reward"];
-    float time = episode["time"];
+    if (episode_number == current_episode) {
+      float reward = episode["reward"];
+      float time = episode["time"];
 
-    Serial.println("Processing episode:");
-    Serial.print("Episode number: ");
-    Serial.print(episode_number);
-    Serial.print(", Reward: ");
-    Serial.print(reward);
-    Serial.print(", Time: ");
-    Serial.println(time);
-    Serial.flush();
-
-    JsonArray steps = episode["steps"];
-    for (JsonObject step : steps) {
-      int hop = step["hop"];
-      String node_from = step["node_from"];
-      String node_to = String(mesh.getNodeId());
-
-      Serial.println("Processing step:");
-      Serial.print("Hop: ");
-      Serial.print(hop);
-      Serial.print(", Node from: ");
-      Serial.print(node_from);
-      Serial.print(", Node to: ");
-      Serial.println(node_to);
+      Serial.println("Processing episode:");
+      Serial.print("Episode number: ");
+      Serial.print(episode_number);
+      Serial.print(", Reward: ");
+      Serial.print(reward);
+      Serial.print(", Time: ");
+      Serial.println(time);
       Serial.flush();
 
-      // Add reward to episode
-      float updatedReward = ((float) episode["reward"]) + 100.00; // Master node found!
-      episode["reward"] = String(updatedReward);
-      Serial.println("Master node found! Reward increased by 100");
-      Serial.print("Updated reward: ");
-      Serial.println(String(episode["reward"]));
-      Serial.flush();
+      JsonArray steps = episode["steps"];
+      for (JsonObject step : steps) {
+        int hop = step["hop"];
+        String node_from = step["node_from"];
+        String node_to = String(mesh.getNodeId());
 
-      // Update Q-Table
-      updateQTable(node_from, node_to, episode["reward"], q_alpha, q_gamma, doc);
+        Serial.println("Processing step:");
+        Serial.print("Hop: ");
+        Serial.print(hop);
+        Serial.print(", Node from: ");
+        Serial.print(node_from);
+        Serial.print(", Node to: ");
+        Serial.println(node_to);
+        Serial.flush();
 
-      String updatedJsonString;
-      serializeJson(doc, updatedJsonString);
+        // Add reward to episode
+        float updatedReward = ((float) episode["reward"]) + 100.00; // Master node found!
+        episode["reward"] = String(updatedReward);
+        Serial.println("Master node found! Reward increased by 100");
+        Serial.print("Updated reward: ");
+        Serial.println(String(episode["reward"]));
+        Serial.flush();
 
-      // print learning results so the middleware catches them and sends it over
-      // to the server
-      Serial.print("Log message with structure: ");
-      Serial.println(updatedJsonString);
+        // Update Q-Table
+        updateQTable(node_from, node_to, episode["reward"], q_alpha, q_gamma, doc);
 
-      // broadcast the final learning data for this episode to all nodes
-      qTable = doc["q_table"];
-      /*
-      String qTableString;
-      serializeJsonPretty(qTable, qTableString);
-      mesh.sendBroadcast(qTableString);
-      */
+        String updatedJsonString;
+        serializeJson(doc, updatedJsonString);
+
+        // print learning results so the middleware catches them and sends it over
+        // to the server
+        Serial.print("Log message with structure: ");
+        Serial.println(updatedJsonString);
+
+        qTable = doc["q_table"];
+
+        // broadcast message from the middleware may take some time to get to the network
+        // I'm implementing this as a fallback for that, we'd need to think about a 
+        // mechanism for blocking a new send until the sender gets a broadcastMessage
+        StaticJsonDocument<1024> broadcastMessage;
+        broadcastMessage["q_table"] = qTable;
+        broadcastMessage["episodes"] = doc["episodes"];
+        broadcastMessage["alpha"] = doc["alpha"];
+        broadcastMessage["gamma"] = doc["gamma"];
+        broadcastMessage["epsilon"] = doc["epsilon"];
+
+        String broadcastMessageString;
+        serializeJsonPretty(broadcastMessage, broadcastMessageString);
+        mesh.sendBroadcast(broadcastMessageString);
+      }
     }
   }
 }
