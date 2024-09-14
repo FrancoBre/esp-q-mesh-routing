@@ -24,29 +24,29 @@ int chooseAction(int state, JsonDocument& doc, float epsilon);
 void sendMessageToNextHop(uint32_t next_hop, String &msg);
 
 void newConnectionCallback(uint32_t nodeId) {
-  Serial.print("--> startHere: New Connection, nodeId = ");
+  Serial.print("New Connection, nodeId = ");
   Serial.println(nodeId);
 }
 
 void changedConnectionCallback() {
-  Serial.println("Changed connections");
 }
 
 void nodeTimeAdjustedCallback(int32_t offset) {
-  Serial.print("Adjusted time ");
-  Serial.print(mesh.getNodeTime());
-  Serial.print(". Offset = ");
-  Serial.println(offset);
 }
 
 bool isHopMessage(StaticJsonDocument<1024> doc) {
-  return doc.containsKey("current_node_id") && doc.containsKey("q_parameters")
-    && doc.containsKey("current_episode") && doc.containsKey("episodes") 
-    && doc.containsKey("q_table");
+  return doc.containsKey("hop");
+}
+
+bool isBroadcastMessage(StaticJsonDocument<1024> doc) {
+  return doc.containsKey("broadcast");
 }
 
 // Needed for painless library
 void receivedCallback(uint32_t from, String &msg) {
+    Serial.print("Free heap: ");
+    Serial.println(ESP.getFreeHeap());
+
     Serial.print("startHere: Received from ");
     Serial.print(from);
     Serial.print(" msg=");
@@ -73,17 +73,16 @@ void receivedCallback(uint32_t from, String &msg) {
 
         int current_episode = doc["current_episode"];
         float accumulated_reward = doc["accumulated_reward"];
-        float total_time = doc["total_time"];
 
         JsonArray episodes = doc["episodes"];
         for (JsonObject episode : episodes) {
             int episode_number = episode["episode_number"];
             if (episode_number == current_episode) {
               float reward = episode["reward"];
-              float time = episode["time"];
 
               // Add reward to episode
               episode["reward"] = String(reward - 1.0); // This node is not master!
+              doc["accumulated_reward"] = String(reward - 1.0);
               Serial.println("This node is not master! Reduce episode reward in 1");
               Serial.println(String(episode["reward"]));
               Serial.flush();
@@ -98,25 +97,10 @@ void receivedCallback(uint32_t from, String &msg) {
               JsonArray steps = episode["steps"];
               int hop = steps.size();
               
-              Serial.println("about to add the mf new hop to the steps array!");
-              Serial.flush();
-              // add the hop that's going to occur
               JsonObject newHop = steps.createNestedObject();
               newHop["hop"] = hop;
               newHop["node_from"] = String(mesh.getNodeId());
               newHop["node_to"] = String(next_action);
-              Serial.println("new hop added:");
-              serializeJson(newHop, Serial);
-              Serial.println();
-              Serial.println("steps with new hop:");
-              serializeJson(steps, Serial);
-              Serial.println();
-              Serial.println("episode with new hop:");
-              serializeJson(episode, Serial);
-              Serial.println();
-              Serial.println("whole object with new hop:");
-              serializeJson(doc, Serial);
-              Serial.flush();
 
               // Update Q-Table for the current hop
               updateQTable(newHop["node_to"], newHop["node_from"], episode["reward"], q_alpha, q_gamma, doc);
@@ -125,12 +109,13 @@ void receivedCallback(uint32_t from, String &msg) {
               String updatedJsonString;
               serializeJson(doc, updatedJsonString);
               qTable = doc["q_table"];
+              doc["hop"] = true;
               sendMessageToNextHop(next_action, updatedJsonString);
             }
         }
     }
     // Message is a q_table update broadcast
-    else if (doc.is<JsonObject>()) {
+    else if (isBroadcastMessage(doc)) {
       Serial.println("Received Q-Table update:");
       serializeJsonPretty(doc, Serial);
       qTable = doc["q_table"];
@@ -380,7 +365,6 @@ void setup() {
     delay(1000);
   }
 
-  //mesh.setDebugMsgTypes( ERROR | MESH_STATUS | CONNECTION | SYNC | COMMUNICATION | GENERAL | MSG_TYPES | REMOTE ); // all types on
   mesh.setDebugMsgTypes( ERROR | STARTUP );  // set before init() so that you can see startup messages
 
   mesh.init( MESH_PREFIX, MESH_PASSWORD, MESH_PORT );

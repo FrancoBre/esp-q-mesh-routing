@@ -4,6 +4,7 @@ import json
 import time
 import re
 import random
+import argparse
 
 serial_port = '/dev/ttyUSB0'
 baud_rate = 9600
@@ -13,8 +14,18 @@ ESP_ENDPOINT = None  # This will be set dynamically
 max_episodes = 100  # Maximum number of episodes for LEARNING phase
 convergence_threshold = 0.01  # Threshold for detecting reward convergence
 previous_q_table = None
+best_parameters = None
+best_hops = float('inf')
+internal_episode_storage = []
 
-# Open serial port for reading master node
+parser = argparse.ArgumentParser(description="Q-learning ESP Node Middleware")
+parser.add_argument('--feedback', action='store_true', help="Enable sending learning data back to the master node")
+parser.add_argument('--verbose', action='store_true', help="Enable detailed logging")
+args = parser.parse_args()
+
+send_feedback_to_master = args.feedback
+verbose_logging = args.verbose
+
 def open_serial_port():
     while True:
         try:
@@ -23,21 +34,17 @@ def open_serial_port():
             return ser
         except serial.SerialException:
             print(f"Failed to connect to {serial_port}. Retrying...")
-            time.sleep(5)  # Espera 5 segundos antes de intentar nuevamente
+            time.sleep(5)  # Wait 5 seconds before retrying
 
 def read_from_serial(ser):
     try:
         line = ser.readline().decode('utf-8').strip()
         return line
-    except UnicodeDecodeError as e:
-        print(f"Failed to decode line: {e}")
-        return None
-    except serial.SerialException as e:
-        print(f"Serial error: {e}")
+    except (UnicodeDecodeError, serial.SerialException) as e:
+        print(f"Failed to read line: {e}")
         return None
 
 def extract_log_data(line):
-    # Ejemplo simple de extracción de datos
     try:
         start = line.find('{')
         end = line.rfind('}') + 1
@@ -46,14 +53,16 @@ def extract_log_data(line):
     except (ValueError, json.JSONDecodeError):
         return None
 
-# Send to visualization server
 def send_to_server(log_data):
     if log_data:
-        response = requests.post(server_url, json=log_data)
-        if response.status_code == 200:
-            print("Log sent successfully")
-        else:
-            print("Failed to send log", response.status_code)
+        try:
+            response = requests.post(server_url, json=log_data)
+            if response.status_code == 200:
+                print("Log sent successfully")
+            else:
+                print("Failed to send log", response.status_code)
+        except requests.exceptions.RequestException as e:
+            print(f"Failed to send log: {e}")
 
 def log_to_file(line):
     with open(log_file_path, 'a') as log_file:
@@ -68,18 +77,37 @@ def has_converged(current_q_table, previous_q_table, threshold):
                 return False
     return True
 
-# Send Q learning parameters back to esp master node 
-def send_parameters_to_esp(parameters):
+def send_parameters_to_master(parameters):
     if ESP_ENDPOINT:
-        response = requests.post(ESP_ENDPOINT, data=parameters)
-        if response.status_code == 200:
-            print("Parameters sent successfully")
-        else:
-            print("Failed to send parameters")
+        try:
+            print("About to send analyzed q-parameters back to master node")
+            response = requests.post(ESP_ENDPOINT, data=parameters)
+            if response.status_code == 200:
+                print("Parameters sent successfully")
+            else:
+                print("Failed to send parameters", response.status_code)
+        except requests.exceptions.RequestException as e:
+            print(f"Failed to send parameters: {e}")
     else:
         print("ESP_ENDPOINT is not set")
 
-# To find optimum q learning parameters
+def verbose_print(message):
+    if verbose_logging:
+        print(message)
+
+def get_episode_count(json_data):
+    return len(json_data.get("episodes", []))
+
+def save_episodes(json_data):
+    global internal_episode_storage
+    episodes = json_data.get("episodes", [])
+    internal_episode_storage.extend(episodes)
+
+def add_episodes_to_line(json_data):
+    global internal_episode_storage
+    json_data["episodes"].extend(internal_episode_storage)
+    internal_episode_storage = []
+
 def genetic_algorithm(data, generations=10, population_size=10):
     def initialize_population(size):
         population = []
@@ -160,38 +188,38 @@ while True:
         line = read_from_serial(ser)
         if line:
             print(line)
-            # Extract IP address from the log
-            ip_match = re.search(r'IP address: (\d+\.\d+\.\d+\.\d+)', line)
-            if ip_match:
-                ESP_ENDPOINT = f"http://{ip_match.group(1)}/update-q-parameters"
-                print(f"ESP_ENDPOINT set to {ESP_ENDPOINT}")
+            if send_feedback_to_master:
+                ip_match = re.search(r'IP address: (\d+\.\d+\.\d+\.\d+)', line)
+                if ip_match:
+                    ESP_ENDPOINT = f"http://{ip_match.group(1)}/update-q-parameters"
+                    verbose_print(f"ESP_ENDPOINT set to {ESP_ENDPOINT}")
 
-            if 'Log message with structure' in line:
-
-                print("extracting data from log")
-                log_data = extract_log_data(line)  # Función para extraer los datos del log
+            if 'Episode results:' in line:
+                verbose_print("Extracting data from log")
+                log_data = extract_log_data(line)  # Extract log data
                 if log_data:
+                    verbose_print(f"Log data extracted successfully {log_data}")
 
-                    print(f"log data extracted successfully {log_data}")
+                    episode_count = get_episode_count(log_data)
+
+                    if episode_count > 10:
+                        save_episodes(log_data)
+                        log_data["episodes"] = []
+
+                    if episode_count <= 10 and internal_episode_storage:
+                        add_episodes_to_line(log_data)
+
                     log_to_file(line)
                     send_to_server(log_data)
 
-                    # Add log_data to data
                     data.append(log_data)
 
                     best_parameters = genetic_algorithm(data)
-                    # best_parameters = {
-                    #     'alpha': 0.1,
-                    #     'gamma': 0.9,
-                    #     'epsilon': 0.1
-                    # }
-                    send_parameters_to_esp(best_parameters)
+                    send_parameters_to_master(best_parameters)
 
-                    # Verificar si la fase de aprendizaje ha terminado
                     current_q_table = log_data.get('q_table', {})
                     if has_converged(current_q_table, previous_q_table, convergence_threshold):
-                        print("Learning phase has converged.")
-                        # Realizar cualquier acción adicional necesaria al finalizar la fase de aprendizaje
+                        verbose_print("Learning phase has converged.")
 
                     previous_q_table = current_q_table
 
