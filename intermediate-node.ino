@@ -1,177 +1,326 @@
 /*
-* INTERMEDIATE NODE
-*/
+ * INTERMEDIATE NODE
+ *
+ * Copyright (c) 2024 Franco Brégoli, Pablo Torres,
+ * Universidad Nacional de General Sarmiento (UNGS), Buenos Aires, Argentina.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation;
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ *
+ * Authors: Franco Brégoli <bregolif.fb@gmail.com>,
+ *          Pablo Torres <ptorres@campus.ungs.edu.ar>
+ *
+ * This project is part of our thesis at Universidad Nacional de General
+ * Sarmiento (UNGS), and is part of a research initiative to apply reinforcement
+ * learning for optimized packet routing in ESP-based mesh networks.
+ *
+ * The source code for this project is available at:
+ * https://github.com/FrancoBre/esp-q-mesh-routing
+ */
+
 #include <ArduinoJson.h>
-#include <map>
-#include <vector>
-#include <random>
+
 #include "painlessMesh.h"
 
-#define   MESH_PREFIX     "whateverYouLike"
-#define   MESH_PASSWORD   "somethingSneaky"
-#define   MESH_PORT       5555
+// Logging macro
+#define LOG(msg)                             \
+  Serial.print("[INTERMEDIATE NODE - Id: "); \
+  Serial.print(g_nodeId);                    \
+  Serial.print(" - ");                       \
+  Serial.print(__FUNCTION__);                \
+  Serial.print("] ");                        \
+  Serial.println(msg);                       \
+  Serial.flush();
 
-painlessMesh  mesh;
+#define MESH_PREFIX "ESP_Q_MESH_ROUTING"
+#define MESH_PASSWORD "ESP_Q_MESH_ROUTING"
+#define MESH_PORT 5555
 
-// save the most recent q table for sending data
-// with the latest learning data
-JsonDocument qTable;
-bool isFirstTime = true;
+// Constants and Hyperparameters
+const int MAX_RETRIES = 10;
+float g_alpha;         // Learning rate
+float g_gamma;         // Discount factor
+float g_epsilon;       // Exploration rate
+float g_epsilonDecay;  // Exploration decay rate
 
+enum MessageType { PACKET_HOP, BROADCAST, HEALTHCHECK, UNKNOWN };
+
+enum NodeState { PROCESSING_EPISODE, EXPLOITATION_PHASE };
+
+// Global variables
+NodeState g_nodeState = PROCESSING_EPISODE;
+StaticJsonDocument<4096> g_qTable;
+StaticJsonDocument<4096> g_persistentDoc;
+float g_accumulatedReward = 0.0;
+String g_nodeId = "MESH NOT INITIALIZED YET";
+
+// Objects declarations
+Scheduler userScheduler;
+painlessMesh mesh;
+
+// Function declarations
+void setup();
+void loop();
 void receivedCallback(uint32_t from, String &msg);
-void updateQTable(String state_from, String state_to, float reward, float alpha, float gamma, JsonDocument& doc);
-int chooseAction(int state, JsonDocument& doc, float epsilon);
-void sendMessageToNextHop(uint32_t next_hop, String &msg);
+void handlePacketHop(StaticJsonDocument<1024> &doc);
+void handleBroadcast(StaticJsonDocument<1024> &doc);
+void handleHealthCheck();
+MessageType getMessageType(const String &typeStr);
+int chooseAction();
+int chooseBestAction(const JsonObject &actions,
+                     const std::vector<int> &neighbors);
+void updateQTable(const String &state_from, const String &state_to,
+                  float reward, float alpha, float gamma,
+                  StaticJsonDocument<1024> &doc);
+bool sendMessageWithRetries(uint32_t next_hop, String &msg);
+void extractHyperparameters(StaticJsonDocument<1024> &doc);
+void updateEpisodeRewards(JsonObject &episode);
+void createNewHop(JsonObject &episode, const String &node_from,
+                  const String &next_action, float reward);
+void prepareAndSendMessage(StaticJsonDocument<1024> &doc,
+                           const String &next_action);
+JsonObject findCurrentEpisode(JsonArray &episodes, int current_episode);
+void processEpisode(JsonObject &episode, StaticJsonDocument<1024> &doc);
 
-void newConnectionCallback(uint32_t nodeId) {
-  Serial.print("New Connection, nodeId = ");
-  Serial.println(nodeId);
+// Main logic functions
+void setup() {
+  Serial.begin(9600);
+
+  for (uint8_t t = 10; t > 0; t--) {
+    LOG("WAIT " + String(t) + "...");
+    delay(1000);
+  }
+
+  LOG("Initializing INTERMEDIATE NODE");
+
+  // mesh.setDebugMsgTypes(ERROR | STARTUP | CONNECTION);
+  mesh.init(MESH_PREFIX, MESH_PASSWORD, &userScheduler, MESH_PORT);
+  mesh.onReceive(&receivedCallback);
+  g_nodeId = String(mesh.getNodeId());
+
+  LOG("Mesh initialized successfully");
 }
 
-void changedConnectionCallback() {
-}
+void loop() { mesh.update(); }
 
-void nodeTimeAdjustedCallback(int32_t offset) {
-}
-
-bool isHopMessage(StaticJsonDocument<1024> doc) {
-  return doc.containsKey("hop");
-}
-
-bool isBroadcastMessage(StaticJsonDocument<1024> doc) {
-  return doc.containsKey("broadcast");
-}
-
-// Needed for painless library
+// Messaging and episode handling
 void receivedCallback(uint32_t from, String &msg) {
-    Serial.print("Free heap: ");
-    Serial.println(ESP.getFreeHeap());
+  LOG("Received message from " + String(from) + ": " + msg);
 
-    Serial.print("startHere: Received from ");
-    Serial.print(from);
-    Serial.print(" msg=");
-    Serial.println(msg.c_str());
+  StaticJsonDocument<1024> doc;
+  DeserializationError error = deserializeJson(doc, msg);
 
-    // Deserialize the JSON message
-    StaticJsonDocument<1024> doc;
-    DeserializationError error = deserializeJson(doc, msg);
+  if (error) {
+    LOG("Failed to parse message: ");
+    Serial.println(error.c_str());
+    return;
+  }
 
-    if (error) {
-        Serial.print(F("deserializeJson() failed: "));
-        Serial.println(error.c_str());
-        Serial.flush();
-        return;
-    }
-
-    // Check if the message has all the learning data
-    if (isHopMessage(doc)) {
-        // Extract q-learning parameters and state information
-        float q_alpha = doc["q_parameters"]["alpha"];
-        float q_gamma = doc["q_parameters"]["gamma"];
-        float q_epsilon = doc["q_parameters"]["epsilon"];
-        float q_epsilonDecay = doc["q_parameters"]["epsilon_decay"];
-
-        int current_episode = doc["current_episode"];
-        float accumulated_reward = doc["accumulated_reward"];
-
-        JsonArray episodes = doc["episodes"];
-        for (JsonObject episode : episodes) {
-            int episode_number = episode["episode_number"];
-            if (episode_number == current_episode) {
-              float reward = episode["reward"];
-
-              // Add reward to episode
-              episode["reward"] = String(reward - 1.0); // This node is not master!
-              doc["accumulated_reward"] = String(reward - 1.0);
-              Serial.println("This node is not master! Reduce episode reward in 1");
-              Serial.println(String(episode["reward"]));
-              Serial.flush();
-
-              // Choose next action using epsilon-greedy policy
-              int next_action = chooseAction(mesh.getNodeId(), doc, q_epsilon);
-
-              if (next_action == -1) {
-                return;
-              }
-
-              JsonArray steps = episode["steps"];
-              int hop = steps.size();
-              
-              JsonObject newHop = steps.createNestedObject();
-              newHop["hop"] = hop;
-              newHop["node_from"] = String(mesh.getNodeId());
-              newHop["node_to"] = String(next_action);
-
-              // Update Q-Table for the current hop
-              updateQTable(newHop["node_to"], newHop["node_from"], episode["reward"], q_alpha, q_gamma, doc);
-
-              // Send updated message to the next hop
-              String updatedJsonString;
-              serializeJson(doc, updatedJsonString);
-              qTable = doc["q_table"];
-              doc["hop"] = true;
-              sendMessageToNextHop(next_action, updatedJsonString);
-            }
-        }
-    }
-    // Message is a q_table update broadcast
-    else if (isBroadcastMessage(doc)) {
-      Serial.println("Received Q-Table update:");
-      serializeJsonPretty(doc, Serial);
-      qTable = doc["q_table"];
-    } else {
-      Serial.println("Unknown message structure");
-      Serial.flush();
-    }
+  MessageType msgType = getMessageType(doc["type"]);
+  switch (msgType) {
+    case PACKET_HOP:
+      handlePacketHop(doc);
+      break;
+    case BROADCAST:
+      handleBroadcast(doc);
+      break;
+    case HEALTHCHECK:
+      handleHealthCheck();
+      break;
+    default:
+      LOG("Unknown message type");
+      break;
+  }
 }
 
-void updateQTable(String state_from, String state_to, float reward, float alpha, float gamma, JsonDocument& doc) {
-  auto nodes = mesh.getNodeList(true);
-  std::vector<int> neighbors;
-  String nodesStr;
-  int num_neighbors = 0;
+void handlePacketHop(StaticJsonDocument<1024> &doc) {
+  LOG("Processing PACKET_HOP");
 
-  //JsonObject q_table = doc["q_table"];
+  extractHyperparameters(doc);
+
+  int current_episode = doc["current_episode"];
+  g_accumulatedReward = doc["accumulated_reward"];
+
+  JsonArray receivedEpisodes = doc["episodes"];
+  JsonObject episode = findCurrentEpisode(receivedEpisodes, current_episode);
+
+  if (!episode.isNull()) {
+    processEpisode(episode, doc);
+  } else {
+    LOG("No matching episode found for current_episode: " +
+        String(current_episode));
+  }
+}
+
+void processEpisode(JsonObject &episode, StaticJsonDocument<1024> &doc) {
+  updateEpisodeRewards(episode);
+
+  String node_from = doc["current_node_id"];
+  String node_to = String(g_nodeId);
+
+  updateQTable(node_from, node_to, episode["reward"], g_alpha, g_gamma, doc);
+
+  createNewHop(episode, node_from, node_to, -1.0);
+
+  int next_action = chooseAction();
+  if (next_action == -1) {
+    return;
+  }
+
+  prepareAndSendMessage(doc, String(next_action));
+}
+
+void handleBroadcast(StaticJsonDocument<1024> &doc) {
+  LOG("Processing BROADCAST");
+
+  if (doc.containsKey("q_table")) {
+    g_qTable = doc["q_table"];
+  }
+
+  if (doc.containsKey("alpha")) {
+    g_alpha = doc["alpha"].as<float>();
+  }
+
+  if (doc.containsKey("gamma")) {
+    g_gamma = doc["gamma"].as<float>();
+  }
+
+  if (doc.containsKey("epsilon")) {
+    g_epsilon = doc["epsilon"].as<float>();
+  }
+
+  if (doc.containsKey("accumulated_reward")) {
+    g_accumulatedReward = doc["accumulated_reward"].as<float>();
+  }
+
+  LOG("Broadcast processed successfully");
+}
+
+// Hyperparameter and episode management
+void extractHyperparameters(StaticJsonDocument<1024> &doc) {
+  g_alpha = doc["hyperparameters"]["alpha"];
+  g_gamma = doc["hyperparameters"]["gamma"];
+  g_epsilon = doc["hyperparameters"]["epsilon"];
+  g_epsilonDecay = doc["hyperparameters"]["epsilon_decay"];
+}
+
+JsonObject findCurrentEpisode(JsonArray &episodes, int current_episode) {
+  for (JsonObject episode : episodes) {
+    if (episode["episode_number"] == current_episode) {
+      return episode;
+    }
+  }
+  return JsonObject();
+}
+
+void updateEpisodeRewards(JsonObject &episode) {
+  float updatedReward =
+      ((float)episode["reward"]) - 1.00;  // Not the master node
+  episode["reward"] = String(updatedReward);
+  float accumulated_reward = ((float)episode["accumulated_reward"]) - 1.00;
+  episode["accumulated_reward"] = String(accumulated_reward);
+
+  LOG("Updated reward: " + String(updatedReward));
+}
+
+void createNewHop(JsonObject &episode, const String &node_from,
+                  const String &next_action, float reward) {
+  JsonArray steps = episode["steps"];
+  int hop = steps.size();
+  JsonObject newHop = steps.createNestedObject();
+  newHop["hop"] = hop;
+  newHop["node_from"] = node_from;
+  newHop["node_to"] = String(next_action);
+  newHop["reward"] = reward;
+}
+
+void prepareAndSendMessage(StaticJsonDocument<1024> &doc,
+                           const String &next_action) {
+  String updatedJsonString;
+  serializeJson(doc, updatedJsonString);
+  g_qTable = doc["q_table"];
+  doc["type"] = "PACKET_HOP";
+
+  uint32_t next_action_int = next_action.toInt();
+  sendMessageWithRetries(next_action_int, updatedJsonString);
+}
+
+void handleHealthCheck() { LOG("healthy, Node ID: " + g_nodeId); }
+
+MessageType getMessageType(const String &typeStr) {
+  if (typeStr == "PACKET_HOP") return PACKET_HOP;
+  if (typeStr == "BROADCAST") return BROADCAST;
+  if (typeStr == "HEALTHCHECK") return HEALTHCHECK;
+  return UNKNOWN;
+}
+
+// Q-Learning functions
+void updateQTable(const String &state_from, const String &state_to,
+                  float reward, float alpha, float gamma,
+                  StaticJsonDocument<1024> &doc) {
+  JsonObject q_table = doc["q_table"];
+
+  initializeOrUpdateQTable(q_table);
+
+  ensureStateExists(q_table, state_from, state_to);
+
+  updateQValue(q_table, state_from, state_to, reward, alpha, gamma);
+}
+
+void initializeOrUpdateQTable(JsonObject &q_table) {
+  auto nodes = mesh.getNodeList(true);
+  LOG("Initializing Q-table with all possible states and actions...");
+
   for (auto &&id : nodes) {
     String node_from = String(id);
     for (auto &&id_2 : nodes) {
       String node_to = String(id_2);
 
       if (id_2 != id) {
-        if (!doc["q_table"].containsKey(node_from)) {
-          doc["q_table"].createNestedObject(node_from);
+        if (!q_table.containsKey(node_from)) {
+          q_table.createNestedObject(node_from);
+          LOG("Initializing state_from: " + node_from);
         }
 
-        if (!doc["q_table"][node_to].containsKey(node_to)) {
-          doc["q_table"][node_from][node_to] = 0.0; // Initialize Q-value if not present
+        if (!q_table[node_from].containsKey(node_to)) {
+          q_table[node_from][node_to] = 0.0f;
+          LOG("Initializing state_to: " + node_to +
+              " for state_from: " + node_from);
         }
       }
     }
   }
+}
 
-  Serial.println("Q-table:");
-  serializeJsonPretty(doc["q_table"], Serial);
-  Serial.flush();
-
-  // Ensure state_from exists in q_table
-  if (!doc["q_table"].containsKey(state_from)) {
-    doc["q_table"].createNestedObject(state_from);
+void ensureStateExists(JsonObject &q_table, const String &state_from,
+                       const String &state_to) {
+  if (!q_table.containsKey(state_from)) {
+    q_table.createNestedObject(state_from);
+    LOG("State from " + state_from + " not found in Q-table, initializing...");
   }
 
-  // Ensure state_to exists in q_table[state_from]
-  if (!doc["q_table"][state_from].containsKey(state_to)) {
-    doc["q_table"][state_from][state_to] = 0.0; // Initialize Q-value if not present
+  if (!q_table[state_from].containsKey(state_to)) {
+    q_table[state_from][state_to] = 0.0f;
+    LOG("State to " + state_to + " not found in Q-table[" + state_from +
+        "], initializing with 0.0");
   }
+}
 
-  // Retrieve Q-value to update
-  float currentQ = doc["q_table"][state_from][state_to].as<float>();
-  Serial.print("Current Q:");
-  Serial.println(String(currentQ));
+float getMaxQValue(JsonObject &q_table, const String &state_to) {
+  float maxQ = 0.0f;
 
-  // Calculate maxQ for state_to
-  float maxQ = -9999.0; // Start with a very low value
-  if (doc["q_table"].containsKey(state_to)) {
-    JsonObject actions = doc["q_table"][state_to];
+  if (q_table.containsKey(state_to)) {
+    JsonObject actions = q_table[state_to];
     for (JsonPair kv : actions) {
       float value = kv.value().as<float>();
       if (value > maxQ) {
@@ -179,205 +328,100 @@ void updateQTable(String state_from, String state_to, float reward, float alpha,
       }
     }
   }
+  LOG("Max Q-value for state_to " + state_to + ": " + String(maxQ));
+  return maxQ;
+}
 
-  // Apply Bellman equation to update Q-value
+void updateQValue(JsonObject &q_table, const String &state_from,
+                  const String &state_to, float reward, float alpha,
+                  float gamma) {
+  float currentQ = q_table[state_from][state_to].as<float>();
+  LOG("Current Q-value for Q[" + state_from + "][" + state_to +
+      "]: " + String(currentQ));
+
+  float maxQ = getMaxQValue(q_table, state_to);
+
   float updatedQ = currentQ + alpha * (reward + gamma * maxQ - currentQ);
-  Serial.print("updatedQ :");
-  Serial.println(String(updatedQ));
+  LOG("Updated Q-value using Bellman equation: " + String(updatedQ));
 
-  // Update Q-value in q_table
-  doc["q_table"][state_from][state_to] = updatedQ;
-
-  Serial.print("q_table with updated q:");
-  serializeJsonPretty(doc["q_table"], Serial);
-
-  // Log updated Q-table
-  Serial.println("Updated Q-table:");
-  serializeJsonPretty(doc["q_table"], Serial);
-  Serial.println();
-  Serial.flush();
+  q_table[state_from][state_to] = updatedQ;
+  LOG("Q-table updated for Q[" + state_from + "][" + state_to +
+      "] = " + String(updatedQ));
 }
 
-int chooseAction(int state, JsonDocument& doc, float epsilon) {
-    auto nodes = mesh.getNodeList(false);
-    std::vector<int> neighbors;
-    String nodesStr;
-    int num_neighbors = 0;
-
-    Serial.print("iterating over node list ");
-    for (auto &&id : nodes) {
-        neighbors.push_back(id);
-        nodesStr += String(id) + String(" ");
-        Serial.print(nodesStr);
-        num_neighbors++;
-    }
-    Serial.flush();
-
-    if (num_neighbors == 0) {
-        Serial.println("No neighbors found");
-        return -1;
-    }
-
-    if (isFirstTime) {
-        Serial.println("Populating QTable for the first time");
-        StaticJsonDocument<1024> doc;
-        JsonObject q_table = doc.createNestedObject("q_table");
-
-        // Asegurarse de que cada estado tiene un objeto dentro de la Q-table
-        for (auto &&id : nodes) {
-            JsonObject stateObj = q_table.createNestedObject(String(state)); // Cambio aquí
-            for (auto &&action : nodes) {
-                stateObj[String(action)] = 0.0; // Inicializar valores Q para cada acción
-            }
-        }
-
-        String jsonString;
-        serializeJsonPretty(doc, jsonString);
-        Serial.println(jsonString);
-        qTable = doc;
-        isFirstTime = false;
-    } else {
-        Serial.println("");
-        Serial.println("Updating QTable with missing neighbors");
-
-        // Asegurarse de que el estado actual tiene un objeto dentro de la Q-table
-        if (!qTable["q_table"].containsKey(String(state))) {
-            JsonObject stateObj = qTable["q_table"].createNestedObject(String(state));
-            for (auto &&action : nodes) {
-                stateObj[String(action)] = 0.0; // Inicializar valores Q para cada acción
-            }
-        }
-
-        // Verificar si los vecinos están en la Q-table para el estado actual
-        JsonObject stateObj = qTable["q_table"][String(state)];
-        for (auto &&id : nodes) {
-            if (!stateObj.containsKey(String(id))) {
-                Serial.print("Adding missing action for neighbor ");
-                Serial.println(String(id));
-                stateObj[String(id)] = 0.0; // Inicializar valor Q para la acción faltante
-            }
-        }
-
-        serializeJsonPretty(qTable, Serial);
-    }
-
-    Serial.flush();
-
-    Serial.print("Neighbors for state ");
-    Serial.print(String(state));
-    Serial.print(" are ");
-    Serial.println(nodesStr);
-    Serial.flush();
-
-    if (random() < epsilon) {
-        // Explorar
-        int action_index = random(0, num_neighbors - 1);
-        int action = neighbors[action_index];
-        Serial.println("Exploring action");
-        Serial.println(action);
-        Serial.flush();
-        return action;
-    } else {
-        // Explotar: elegir la acción con el valor Q más alto
-        if (!qTable["q_table"].containsKey(String(state))) {
-            Serial.print("No Q-values found for state ");
-            Serial.println(String(state));
-
-            Serial.println("in qTable:");
-            serializeJsonPretty(qTable, Serial);
-
-            Serial.println("in qTable['q_table'");
-            serializeJsonPretty(qTable["q_table"], Serial);
-            Serial.flush();
-            return -1;
-        }
-
-        // Asegurarse de que todos los vecinos están en la Q-table para este estado
-        for (auto &&neighbor : neighbors) {
-            if (!qTable["q_table"][String(state)].containsKey(String(neighbor))) {
-                Serial.print("Adding missing action for neighbor ");
-                Serial.println(neighbor);
-                qTable["q_table"][String(state)][String(neighbor)] = 0.0; // Inicializar Q-value para la acción faltante
-            }
-        }
-
-        Serial.println("Available actions are:");
-        serializeJsonPretty(qTable["q_table"][String(state)], Serial);
-
-        float best_value = -1.0;
-        String best_action = "";
-        Serial.println("Starting exploitation phase...");
-        Serial.flush();
-        JsonObject actions = qTable["q_table"][String(state)];
-        for (JsonPair kv : actions) {
-            String action = kv.key().c_str();
-            float value = kv.value().as<float>();
-            uint32_t action_int = action.toInt();
-            Serial.print("Checking action: ");
-            Serial.print(action.c_str());
-            Serial.print(" with value ");
-            Serial.println(value);
-            Serial.flush();
-            if (value > best_value && std::find(neighbors.begin(), neighbors.end(), action_int) != neighbors.end()) {
-                Serial.print("Action ");
-                Serial.print(action.c_str());
-                Serial.print(" is a valid neighbor and has a better value ");
-                Serial.println(value);
-                Serial.flush();
-                best_value = value;
-                best_action = action;
-            } else {
-                Serial.print("Action ");
-                Serial.print(action.c_str());
-                Serial.println(" is not valid or does not have a better value");
-                Serial.flush();
-            }
-        }
-        Serial.print("Exploiting best action: ");
-        Serial.print(best_action.c_str());
-        Serial.print(" with value ");
-        Serial.println(best_value);
-        Serial.flush();
-        return best_action.toInt();
-    }
-}
-
-void sendMessageToNextHop(uint32_t next_hop, String &msg) {
-  Serial.print("Sending message to next hop ");
-  Serial.print(next_hop);
-  Serial.print(": ");
-  Serial.println(msg);
-  Serial.flush();
-  mesh.sendSingle(next_hop, msg);
-}
-
-void setup() {
-  Serial.begin(9600);
-  Serial.println();
-  Serial.println();
-  Serial.println();
-  Serial.println();
-  Serial.println("Initializing INTERMEDIATE NODE");
-
-  for (uint8_t t = 10; t > 0; t--) {
-    Serial.printf("[SETUP] WAIT %d...\n", t);
-    Serial.flush();
-    delay(1000);
+float getMaxQValue(const String &state) {
+  if (!g_qTable.containsKey(state)) {
+    return 0.0f;
   }
 
-  mesh.setDebugMsgTypes( ERROR | STARTUP );  // set before init() so that you can see startup messages
+  float max_q = 0.0f;
+  for (JsonPair kv : g_qTable[state].as<JsonObject>()) {
+    float q_value = kv.value().as<float>();
+    if (q_value > max_q) {
+      max_q = q_value;
+    }
+  }
 
-  mesh.init( MESH_PREFIX, MESH_PASSWORD, MESH_PORT );
-  mesh.onReceive(&receivedCallback);
-  mesh.onNewConnection(&newConnectionCallback);
-  mesh.onChangedConnections(&changedConnectionCallback);
-  mesh.onNodeTimeAdjusted(&nodeTimeAdjustedCallback);
-
-  // This node and all other nodes should ideally know the mesh contains a root, so call this on all nodes
-  mesh.setContainsRoot(true);
+  return max_q;
 }
 
-void loop() {
-  // it will run the user scheduler as well
-  mesh.update();
+// Choose action using epsilon-greedy strategy
+int chooseAction() {
+  auto nodes = mesh.getNodeList(false);
+  std::vector<int> neighbors;
+  for (const auto &id : nodes) {
+    neighbors.push_back(id);
+  }
+
+  if (neighbors.empty()) {
+    LOG("No neighbors found");
+    return -1;
+  }
+
+  if (random(0, 100) < g_epsilon * 100) {
+    int action_index = random(0, neighbors.size());
+    return neighbors[action_index];  // Explore
+  } else {
+    // Exploit: choose action with the highest Q-value
+    return chooseBestAction(g_qTable[g_nodeId], neighbors);
+  }
+}
+
+// Helper function to choose the best action (exploit)
+int chooseBestAction(const JsonObject &actions,
+                     const std::vector<int> &neighbors) {
+  float best_value = -1.0;
+  int best_action = -1;
+
+  for (const auto &neighbor : neighbors) {
+    float value = actions[String(neighbor)].as<float>();
+    if (value > best_value) {
+      best_value = value;
+      best_action = neighbor;
+    }
+  }
+
+  if (best_action == -1) {
+    LOG("No valid actions for exploitation found. Defaulting to exploration.");
+    return neighbors[random(0, neighbors.size())];
+  }
+
+  return best_action;
+}
+
+// Retry logic
+bool sendMessageWithRetries(uint32_t next_hop, String &msg) {
+  int retryCount = 0;
+
+  while (retryCount < MAX_RETRIES) {
+    if (mesh.sendSingle(next_hop, msg)) {
+      return true;
+      break;
+    } else {
+      retryCount++;
+      delay(100);
+    }
+  }
+
+  return false;
 }

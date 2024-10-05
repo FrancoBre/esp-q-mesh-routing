@@ -1,322 +1,400 @@
 /*
  * MASTER NODE
+ *
+ * Copyright (c) 2024 Franco Brégoli, Pablo Torres,
+ * Universidad Nacional de General Sarmiento (UNGS), Buenos Aires, Argentina.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation;
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ *
+ * Authors: Franco Brégoli <bregolif.fb@gmail.com>,
+ *          Pablo Torres <ptorres@campus.ungs.edu.ar>
+ *
+ * This project is part of our thesis at Universidad Nacional de General
+ * Sarmiento (UNGS), and is part of a research initiative to apply reinforcement
+ * learning for optimized packet routing in ESP-based mesh networks.
+ *
+ * The source code for this project is available at:
+ * https://github.com/FrancoBre/esp-q-mesh-routing
  */
-#include "IPAddress.h"
-
-#ifdef ESP8266#include "Hash.h"
-
-#include <ESPAsyncTCP.h>
-
-#else#include <AsyncTCP.h>
-
-#endif#include <ESPAsyncWebServer.h>
-
-#include <ArduinoJson.h>
-
-#include <map>
-
-#include <vector>
-
-#include <random>
-
-#include "painlessMesh.h"
-
-#include <ESP8266WiFi.h>
-
-#include <ESPAsyncTCP.h>
 
 #include <ESPAsyncWebServer.h>
 
-#define STATION_SSID "whateverYouLike"
-#define STATION_PASSWORD "somethingSneaky"
-#define STATION_PORT 5555
+#include "painlessMesh.h"
 
-#define MESH_PREFIX "whateverYouLike"
-#define MESH_PASSWORD "somethingSneaky"
+// Logging macro
+#define LOG(msg)                       \
+  Serial.print("[MASTER NODE - Id: "); \
+  Serial.print(g_nodeId);              \
+  Serial.print(" - ");                 \
+  Serial.print(__FUNCTION__);          \
+  Serial.print("] ");                  \
+  Serial.println(msg);                 \
+  Serial.flush();
+
+// Network and mesh configuration
+#define MESH_PREFIX "ESP_Q_MESH_ROUTING"
+#define MESH_PASSWORD "ESP_Q_MESH_ROUTING"
 #define MESH_PORT 5555
 
+#ifdef ENABLE_FEEDBACK_SERVER
+#define WIFI_SSID "whateverYouLike"
+#define WIFI_PASSWORD "somethingSneaky"
 #define HOSTNAME "HTTP_BRIDGE"
+#endif
+
+// Timing constants
+const unsigned long TWENTY_SECONDS_MILLIS = 20000;
+const int MAX_RETRIES = 20;
+
+enum MessageType { PACKET_HOP, BROADCAST, HEALTHCHECK };
+
+enum MasterState { WAITING_FOR_INITIAL_MESSAGE, BROADCAST_MESSAGE_TO_BE_SENT };
+
+// Global variables
+MasterState g_masterState = WAITING_FOR_INITIAL_MESSAGE;
+StaticJsonDocument<4096> g_broadcastMessage;
+StaticJsonDocument<4096> g_qTable;
+JsonArray g_episodes;
+float g_accumulatedReward = 0.0;
+int g_currentEpisode = 1;
+unsigned long g_lastSentMessage = 0;
+String g_nodeId = "MESH NOT INITIALIZED YET";
+
+// Object declarations
+Scheduler userScheduler;
+painlessMesh mesh;
 
 #ifdef ENABLE_FEEDBACK_SERVER
+IPAddress myAPIP(0, 0, 0, 0);
 AsyncWebServer server(80);
 #endif
 
-Scheduler userScheduler; // to control your personal task
-painlessMesh mesh;
-IPAddress myIP(0, 0, 0, 0);
-IPAddress myAPIP(0, 0, 0, 0);
-IPAddress getlocalIP();
-
-// save the most recent q table for sending data
-// with the latest learning data
-JsonDocument broadcastMessage;
-bool broadcastMessageToBeSent;
-
-bool initialMessageReceived = false;
-unsigned long lastSentMessage = 0;
-unsigned long twentySecondsInMillis = 20000;
-
-JsonDocument qTable;
-JsonArray episodes;
-float accumulatedReward = 0.0;
-int currentEpisode = 1;
-
+// Function declarations
+bool isTimeToSendBroadcast();
+void sendInitialBroadcast();
 void sendBroadcastMessage();
-void receivedCallback(uint32_t from, String & msg);
-void updateQTable(String state_from, String state_to, float reward, float alpha, float gamma, JsonDocument & doc);
-void sendMessageToServer(String & msg);
-void handleReceiveQParameters();
+bool sendMessageWithRetries(const String &msg);
+void handleEpisodeFinalization(StaticJsonDocument<1024> &doc);
+void updateQTable(const String &state_from, const String &state_to,
+                  float reward, float alpha, float gamma,
+                  StaticJsonDocument<1024> &doc);
+void buildBroadcastMessage(StaticJsonDocument<1024> &doc);
+MessageType getMessageType(const String &typeStr);
 void refreshQTableOnConnectionChange();
-IPAddress getlocalIP();
+void createNewHop(JsonObject &episode, const String &node_from,
+                  const String &next_action, float reward);
 
-Task taskSendMessage(TASK_SECOND * 10, TASK_FOREVER, & sendBroadcastMessage);
+Task taskSendMessage(TASK_SECOND * 10, TASK_FOREVER, &sendBroadcastMessage);
 
-void logBroadcastMessageDetails() {
-  // Measure the size of the broadcastMessage JSON object
-  size_t messageSize = measureJsonPretty(broadcastMessage);
+// Main logic functions
+void setup() {
+  Serial.begin(9600);
 
-  // Get the available heap memory
-  size_t freeHeap = ESP.getFreeHeap();
-  size_t maxFreeBlock = ESP.getMaxFreeBlockSize();
+  for (uint8_t t = 10; t > 0; t--) {
+    LOG("WAIT " + String(t) + "...");
+    delay(1000);
+  }
 
-  // Print the details to the Serial Monitor
-  Serial.print("Broadcast message size: ");
-  Serial.print(messageSize);
-  Serial.println(" bytes");
+  LOG("Initializing MASTER NODE");
 
-  Serial.print("Free heap memory: ");
-  Serial.print(freeHeap);
-  Serial.println(" bytes");
+  // mesh.setDebugMsgTypes(ERROR | STARTUP | CONNECTION);
+  mesh.init(MESH_PREFIX, MESH_PASSWORD, &userScheduler, MESH_PORT);
+  mesh.onReceive(&receivedCallback);
 
-  Serial.print("Max free block size: ");
-  Serial.print(maxFreeBlock);
-  Serial.println(" bytes");
+#ifdef ENABLE_FEEDBACK_SERVER
+  mesh.setHostname(HOSTNAME);
+#endif
+  userScheduler.addTask(taskSendMessage);
+  taskSendMessage.enable();
+  mesh.setRoot(true);
+  mesh.setContainsRoot(true);
+  g_nodeId = String(mesh.getNodeId());
 
-  Serial.println();
+  LOG("Mesh initialized successfully");
+
+#ifdef ENABLE_FEEDBACK_SERVER
+  myAPIP = mesh.getAPIP();
+  LOG("IP address: " + myAPIP.toString());
+
+  server.on("/update-q-parameters", HTTP_POST,
+            [](AsyncWebServerRequest *request) {
+              LOG("Received new Q-learning parameters");
+              StaticJsonDocument<4096> doc;
+
+              if (request->hasParam("alpha", true))
+                doc["alpha"] = request->getParam("alpha", true)->value();
+              if (request->hasParam("gamma", true))
+                doc["gamma"] = request->getParam("gamma", true)->value();
+              if (request->hasParam("epsilon", true))
+                doc["epsilon"] = request->getParam("epsilon", true)->value();
+
+              doc["episodes"] = g_episodes;
+              doc["q_table"] = g_qTable;
+              doc["accumulated_reward"] = g_accumulatedReward;
+              doc["broadcast"] = true;
+
+              String qParametersString;
+              serializeJsonPretty(doc, qParametersString);
+              mesh.sendBroadcast(qParametersString);
+
+              request->send(200, "application/json",
+                            "{\"status\":\"Parameters updated\"}");
+            });
+  server.begin();
+  LOG("Feedback server started on port 80");
+#else
+  LOG("Feedback server is disabled");
+#endif
 }
 
-void sendBroadcastMessage() {
-  // broadcast message from the middleware may take some time to get to the network
-  // I'm implementing this as a fallback for that, we'd need to think about a 
-  // mechanism for blocking a new send until the sender gets a broadcastMessage
-  broadcastMessageToBeSent = (broadcastMessageToBeSent || (millis() - lastSentMessage >= twentySecondsInMillis)) && initialMessageReceived;
+void loop() { mesh.update(); }
 
-  if (broadcastMessageToBeSent) {
-    logBroadcastMessageDetails();
-    String broadcastMessageString;
-    serializeJsonPretty(broadcastMessage, broadcastMessageString);
-    Serial.println();
-    Serial.println("About to send broadcast");
-    Serial.println(broadcastMessageString);
+// Messaging and episode handling
+void receivedCallback(uint32_t from, String &msg) {
+  LOG("Received message from node " + String(from));
 
-    int retryCount = 0;
-    const int maxRetries = 20;
+  StaticJsonDocument<1024> doc;
+  DeserializationError error = deserializeJson(doc, msg);
 
-    while (retryCount < maxRetries) {
-      if (mesh.sendBroadcast(broadcastMessageString)) {
-        broadcastMessageToBeSent = false;
-        return;
-      }
-      retryCount++;
-      delay(100);
-    }
+  if (error) {
+    LOG("Failed to parse message.");
+    return;
+  }
 
-    Serial.println("Failed to send broadcast message after max retries.");
-    broadcastMessageToBeSent = false;
-    lastSentMessage = millis();
+  if (getMessageType(doc["type"]) != PACKET_HOP) {
+    LOG("Received an unprocessable message type. Ignoring.");
+    return;
+  }
+
+  handleEpisodeFinalization(doc);
+}
+
+void handleEpisodeFinalization(StaticJsonDocument<1024> &doc) {
+  float q_alpha, q_gamma, q_epsilon, q_epsilonDecay, accumulated_reward;
+  int current_episode;
+
+  extractHyperparameters(doc, q_alpha, q_gamma, q_epsilon, q_epsilonDecay,
+                         current_episode, accumulated_reward);
+
+  JsonArray receivedEpisodes = doc["episodes"];
+  JsonObject episode = findCurrentEpisode(receivedEpisodes, current_episode);
+
+  if (!episode.isNull()) {
+    processEpisodeFinalization(episode, doc, q_alpha, q_gamma,
+                               accumulated_reward);
+  } else {
+    LOG("No matching episode found for current_episode: " +
+        String(current_episode));
   }
 }
 
-void newConnectionCallback(uint32_t nodeId) {
-  Serial.print("New Connection, nodeId = ");
-  Serial.println(nodeId);
-  refreshQTableOnConnectionChange();
+void createNewHop(JsonObject &episode, const String &node_from,
+                  const String &next_action, float reward) {
+  JsonArray steps;
+  if (episode.containsKey("steps")) {
+    steps = episode["steps"].as<JsonArray>();
+  } else {
+    steps = episode.createNestedArray("steps");
+    LOG("Steps array was missing. Created new steps array.");
+  }
+
+  int hop = steps.size();
+  JsonObject newHop = steps.createNestedObject();
+
+  newHop["hop"] = hop;
+  newHop["node_from"] = node_from;
+  newHop["node_to"] = String(next_action);
+  newHop["reward"] = reward;
+
+  LOG("Created new hop from " + node_from + " to " + next_action +
+      " with reward: " + String(reward));
 }
 
-void changedConnectionCallback() {
-  Serial.println("Connections Changed");
-  refreshQTableOnConnectionChange();
+void processEpisodeFinalization(JsonObject &episode,
+                                StaticJsonDocument<1024> &doc, float q_alpha,
+                                float q_gamma, float &accumulated_reward) {
+  String node_from = doc["current_node_id"];
+  String node_to = String(mesh.getNodeId());
+
+  float reward = episode["reward"].as<float>();
+  reward += 100.0;
+
+  createNewHop(episode, node_from, node_to, reward);
+
+  String serializedDoc;
+  serializeJsonPretty(doc, serializedDoc);
+  LOG("aca debería estar el nuevo hop: " + serializedDoc);
+
+  accumulated_reward += reward;
+  g_accumulatedReward = accumulated_reward;
+
+  updateQTable(node_from, node_to, reward, q_alpha, q_gamma, doc);
+
+  LOG("Updated reward for step from " + node_from + " to " + node_to + ": " +
+      String(reward));
+
+  buildBroadcastMessage(doc);
+  g_masterState = BROADCAST_MESSAGE_TO_BE_SENT;
+
+  LOG("Master node found, next broadcast will end the episode and start a new "
+      "one");
 }
 
-void nodeTimeAdjustedCallback(int32_t offset) {
-  Serial.print("Node Time Adjusted by offset = ");
-  Serial.println(offset);
-  refreshQTableOnConnectionChange();
+bool isTimeToSendBroadcast() {
+  return (g_masterState == BROADCAST_MESSAGE_TO_BE_SENT &&
+          millis() - g_lastSentMessage >= TWENTY_SECONDS_MILLIS);
+}
+
+void sendBroadcastMessage() {
+  if (g_masterState == WAITING_FOR_INITIAL_MESSAGE) {
+    sendInitialBroadcast();
+    return;
+  }
+
+  if (isTimeToSendBroadcast()) {
+    String broadcastMessageString;
+    serializeJsonPretty(g_broadcastMessage, broadcastMessageString);
+    LOG("Sending broadcast message " + broadcastMessageString);
+
+    if (sendMessageWithRetries(broadcastMessageString)) {
+      LOG("Broadcast message sent successfully.");
+      g_lastSentMessage = millis();
+    } else {
+      LOG("Failed to send broadcast message after max retries.");
+    }
+  }
+}
+
+void sendInitialBroadcast() {
+  LOG("Sending initial broadcast to start episode 1");
+
+  String initialMessage = "{\"type\": \"INITIAL_BROADCAST\"}";
+  if (sendMessageWithRetries(initialMessage)) {
+    LOG("Initial broadcast sent successfully.");
+    g_lastSentMessage = millis();
+  } else {
+    LOG("Failed to send initial broadcast after max retries.");
+  }
+}
+
+void buildBroadcastMessage(StaticJsonDocument<1024> &doc) {
+  g_broadcastMessage["type"] = "BROADCAST";
+  g_broadcastMessage["episodes"] = doc["episodes"];
+  g_broadcastMessage["q_table"] = doc["q_table"];
+  g_broadcastMessage["alpha"] = doc["hyperparameters"]["alpha"];
+  g_broadcastMessage["gamma"] = doc["hyperparameters"]["gamma"];
+  g_broadcastMessage["epsilon"] = doc["hyperparameters"]["epsilon"];
+  g_broadcastMessage["accumulated_reward"] = g_accumulatedReward;
+  g_broadcastMessage["current_episode"] = g_currentEpisode++;
+
+  String broadcastMessageString;
+  serializeJsonPretty(g_broadcastMessage, broadcastMessageString);
+  LOG("Broadcast message built " + broadcastMessageString);
+}
+
+// Hyperparameter and episode management
+void extractHyperparameters(StaticJsonDocument<1024> &doc, float &q_alpha,
+                            float &q_gamma, float &q_epsilon,
+                            float &q_epsilonDecay, int &current_episode,
+                            float &accumulated_reward) {
+  q_alpha = doc["hyperparameters"]["alpha"].as<float>();
+  q_gamma = doc["hyperparameters"]["gamma"].as<float>();
+  q_epsilon = doc["hyperparameters"]["epsilon"].as<float>();
+  q_epsilonDecay = doc["hyperparameters"]["epsilon_decay"].as<float>();
+  current_episode = doc["current_episode"].as<int>();
+  accumulated_reward = doc["accumulated_reward"].as<float>();
+}
+
+JsonObject findCurrentEpisode(JsonArray &episodes, int current_episode) {
+  for (JsonObject episode : episodes) {
+    if (episode["episode_number"] == current_episode) {
+      return episode;
+    }
+  }
+  return JsonObject();
+}
+
+bool sendMessageWithRetries(const String &msg) {
+  for (int retryCount = 0; retryCount < MAX_RETRIES; retryCount++) {
+    if (mesh.sendBroadcast(msg)) return true;
+    delay(100);
+  }
+  return false;
 }
 
 void refreshQTableOnConnectionChange() {
   auto nodes = mesh.getNodeList(true);
-  JsonObject q_table = qTable["q_table"];
+  JsonObject q_table = g_qTable["q_table"];
 
-  for (auto && id: nodes) {
+  for (const auto &id : nodes) {
+    String node_from = String(id);
     bool nodeIsUp = mesh.sendSingle(id, "healthcheck");
 
-    String node_from = String(id);
-
     if (nodeIsUp) {
-      // Si el nodo está activo, verificamos si ya está en la Q-table
       if (!q_table.containsKey(node_from)) {
         q_table.createNestedObject(node_from);
       }
 
-      for (auto && id_2: nodes) {
+      for (const auto &id_2 : nodes) {
         String node_to = String(id_2);
-
-        if (id_2 != id) {
-          if (!q_table[node_from].containsKey(node_to)) {
-            q_table[node_from][node_to] = 0.0;
-          }
+        if (id_2 != id && !q_table[node_from].containsKey(node_to)) {
+          q_table[node_from][node_to] = 0.0;
         }
       }
     } else {
-      // Remove node references from q table
       if (q_table.containsKey(node_from)) {
         q_table.remove(node_from);
       }
-
-      for (auto && id_2: nodes) {
+      for (const auto &id_2 : nodes) {
         String node_to = String(id_2);
-
-        if (q_table.containsKey(node_to)) {
-          if (q_table[node_to].containsKey(node_from)) {
-            q_table[node_to].remove(node_from);
-          }
+        if (q_table.containsKey(node_to) &&
+            q_table[node_to].containsKey(node_from)) {
+          q_table[node_to].remove(node_from);
         }
       }
     }
   }
+
+  LOG("Q-table refreshed based on connection changes");
 }
 
-void receivedCallback(uint32_t from, String & msg) {
-  Serial.println();
-  Serial.println();
-  Serial.println();
-  Serial.println("----------------------------");
-  Serial.println("RECEIVED CALLBACK");
-  Serial.println("----------------------------");
-  Serial.println(ESP.getFreeHeap());
-  initialMessageReceived = true;
-  Serial.print("Free heap: ");
-  Serial.println(ESP.getFreeHeap());
-
-  // Deserialize the JSON message
-  StaticJsonDocument < 1024 > doc;
-  DeserializationError error = deserializeJson(doc, msg);
-
-  Serial.println("Received message:");
-  serializeJsonPretty(doc, Serial);
-
-  if (error) {
-    return;
-  }
-
-  // Extract q-learning parameters and state information
-  float q_alpha = doc["q_parameters"]["alpha"];
-  float q_gamma = doc["q_parameters"]["gamma"];
-  float q_epsilon = doc["q_parameters"]["epsilon"];
-  float q_epsilonDecay = doc["q_parameters"]["epsilon_decay"];
-
-  int current_episode = doc["current_episode"];
-  float accumulated_reward = doc["accumulated_reward"];
-
-  Serial.println("Extracted episode information:");
-  serializeJsonPretty(doc["episodes"], Serial);
-  Serial.print("Current episode: ");
-  Serial.print(current_episode);
-  Serial.print(", Accumulated reward: ");
-  Serial.print(accumulated_reward);
-  Serial.flush();
-
-  episodes = doc["episodes"];
-  for (JsonObject episode: episodes) {
-    int episode_number = episode["episode_number"];
-    if (episode_number == current_episode) {
-      float reward = episode["reward"];
-
-      Serial.println("Processing episode:");
-      Serial.print("Episode number: ");
-      Serial.print(episode_number);
-      Serial.print(", Reward: ");
-      Serial.print(reward);
-      Serial.flush();
-
-      JsonArray steps = episode["steps"];
-      for (JsonObject step: steps) {
-        int hop = step["hop"];
-        String node_from = step["node_from"];
-        String node_to = String(mesh.getNodeId());
-
-        Serial.println("Processing step:");
-        Serial.print("Hop: ");
-        Serial.print(hop);
-        Serial.print(", Node from: ");
-        Serial.print(node_from);
-        Serial.print(", Node to: ");
-        Serial.println(node_to);
-        Serial.flush();
-
-        // Add reward to episode
-        float updatedReward = ((float) episode["reward"]) + 100.00; // Master node found!
-        episode["reward"] = String(updatedReward);
-
-        float accumulated_reward = doc["accumulated_reward"];
-        doc["accumulated_reward"] = String(accumulated_reward + 100.0);
-        accumulatedReward = doc["accumulated_reward"];
-
-        Serial.println("Master node found! Reward increased by 100");
-        Serial.print("Updated reward: ");
-        Serial.println(String(episode["reward"]));
-        Serial.flush();
-
-        // Update Q-Table
-        updateQTable(node_from, node_to, episode["reward"], q_alpha, q_gamma, doc);
-
-        String updatedJsonString;
-        serializeJson(doc, updatedJsonString);
-
-        // print learning results so the middleware catches them and sends it over
-        // to the server
-        Serial.print("Episode results: ");
-        Serial.println(updatedJsonString);
-
-        // flush episodes from json to save memory
-        if (current_episode > 10) {
-          broadcastMessage["episodes"] = doc.createNestedArray("episodes");
-        } else {
-          broadcastMessage["episodes"] = doc["episodes"];
-        }
-
-        broadcastMessage["q_table"] = doc["q_table"];
-        broadcastMessage["alpha"] = doc["q_parameters"]["alpha"];
-        broadcastMessage["gamma"] = doc["q_parameters"]["gamma"];
-        broadcastMessage["epsilon"] = doc["q_parameters"]["epsilon"];
-        broadcastMessage["accumulated_reward"] = accumulatedReward;
-        broadcastMessage["broadcast"] = true;
-        broadcastMessage["current_episode"] = currentEpisode;
-        broadcastMessageToBeSent = true;
-
-        Serial.println("MF current episode to be broadcasted:");
-        Serial.println(String(currentEpisode));
-        Serial.println("MF message to be broadcasted:");
-        serializeJsonPretty(broadcastMessage, Serial);
-
-        qTable = doc["q_table"];
-
-        Serial.println("About to increase current episode counter");
-        currentEpisode++;
-        Serial.println(String(currentEpisode));
-      }
-    }
-  }
+MessageType getMessageType(const String &typeStr) {
+  if (typeStr == "PACKET_HOP") return PACKET_HOP;
+  if (typeStr == "BROADCAST") return BROADCAST;
+  if (typeStr == "HEALTHCHECK") return HEALTHCHECK;
+  return PACKET_HOP;
 }
 
-void updateQTable(String state_from, String state_to, float reward, float alpha, float gamma, JsonDocument & doc) {
+// Q-Learning functions
+void updateQTable(const String &state_from, const String &state_to,
+                  float reward, float alpha, float gamma,
+                  StaticJsonDocument<1024> &doc) {
+  JsonObject q_table = doc["q_table"];
+
+  initializeOrUpdateQTable(q_table);
+
+  ensureStateExists(q_table, state_from, state_to);
+
+  updateQValue(q_table, state_from, state_to, reward, alpha, gamma);
+}
+
+void initializeOrUpdateQTable(JsonObject &q_table) {
   auto nodes = mesh.getNodeList(true);
 
-  JsonObject q_table = doc["q_table"];
-  for (auto && id: nodes) {
+  for (auto &&id : nodes) {
     String node_from = String(id);
-    for (auto && id_2: nodes) {
+    for (auto &&id_2 : nodes) {
       String node_to = String(id_2);
 
       if (id_2 != id) {
@@ -325,180 +403,72 @@ void updateQTable(String state_from, String state_to, float reward, float alpha,
         }
 
         if (!q_table[node_from].containsKey(node_to)) {
-          q_table[node_from][node_to] = 0.0; // Initialize Q-value if not present
+          q_table[node_from][node_to] = 0.0f;
         }
       }
     }
   }
+}
 
-  Serial.println("Q-table:");
-  serializeJsonPretty(q_table, Serial);
-  Serial.flush();
-
-  // Ensure state_from exists in q_table
+void ensureStateExists(JsonObject &q_table, const String &state_from,
+                       const String &state_to) {
   if (!q_table.containsKey(state_from)) {
     q_table.createNestedObject(state_from);
+    LOG("State from " + state_from + " not found in Q-table, initializing...");
   }
 
-  // Ensure state_to exists in q_table[state_from]
   if (!q_table[state_from].containsKey(state_to)) {
-    q_table[state_from][state_to] = 0.0; // Initialize Q-value if not present
+    q_table[state_from][state_to] = 0.0f;
+    LOG("State to " + state_to + " not found in Q-table[" + state_from +
+        "], initializing with 0.0");
   }
+}
 
-  // Retrieve Q-value to update
-  float currentQ = q_table[state_from][state_to].as < float > ();
+float getMaxQValue(JsonObject &q_table, const String &state_to) {
+  float maxQ = 0.0f;
 
-  // Calculate maxQ for state_to
-  float maxQ = 0.0; // Start with zero if no actions are found
   if (q_table.containsKey(state_to)) {
     JsonObject actions = q_table[state_to];
-    for (JsonPair kv: actions) {
-      float value = kv.value().as < float > ();
+    for (JsonPair kv : actions) {
+      float value = kv.value().as<float>();
       if (value > maxQ) {
         maxQ = value;
       }
     }
   }
-
-  // Apply Bellman equation to update Q-value
-  float updatedQ = currentQ + alpha * (reward + gamma * maxQ - currentQ);
-
-  // Update Q-value in q_table
-  q_table[state_from][state_to] = updatedQ;
-
-  // Log updated Q-table
-  Serial.println("Updated Q-table:");
-  serializeJsonPretty(q_table, Serial);
-  Serial.println();
-  Serial.flush();
-
-  /*
-    broadcastMessage["q_table"] = q_table;
-    broadcastMessage["episodes"] = doc["episodes"];
-    broadcastMessage["alpha"] = doc["q_parameters"]["alpha"];
-    broadcastMessage["gamma"] = doc["q_parameters"]["gamma"];
-    broadcastMessage["epsilon"] = doc["q_parameters"]["epsilon"];
-    broadcastMessage["accumulated_reward"] = accumulatedReward;
-    broadcastMessage["broadcast"] = true;
-    broadcastMessageToBeSent = true;
-  */
+  LOG("Max Q-value for state_to " + state_to + ": " + String(maxQ));
+  return maxQ;
 }
 
-void setup() {
-  Serial.begin(9600);
-  // Serial.setDebugOutput(true);
-  Serial.println();
-  Serial.println();
-  Serial.println();
-  Serial.println();
+void updateQValue(JsonObject &q_table, const String &state_from,
+                  const String &state_to, float reward, float alpha,
+                  float gamma) {
+  float currentQ = q_table[state_from][state_to].as<float>();
+  LOG("Current Q-value for Q[" + state_from + "][" + state_to +
+      "]: " + String(currentQ));
 
-  for (uint8_t t = 10; t > 0; t--) {
-    Serial.printf("[SETUP] WAIT %d...\n", t);
-    Serial.flush();
-    delay(1000);
+  float maxQ = getMaxQValue(q_table, state_to);
+
+  float updatedQ = currentQ + alpha * (reward + gamma * maxQ - currentQ);
+  LOG("Updated Q-value using Bellman equation: " + String(updatedQ));
+
+  q_table[state_from][state_to] = updatedQ;
+  LOG("Q-table updated for Q[" + state_from + "][" + state_to +
+      "] = " + String(updatedQ));
+}
+
+float getMaxQValue(const String &state) {
+  if (!g_qTable.containsKey(state)) {
+    return 0.0f;
   }
 
-  Serial.println("Initializing MASTER NODE");
-
-  mesh.setDebugMsgTypes(ERROR | STARTUP | CONNECTION); // set before init() so that you can see startup messages
-
-  mesh.init(MESH_PREFIX, MESH_PASSWORD, & userScheduler, MESH_PORT);
-
-  mesh.onReceive( & receivedCallback);
-
-  mesh.stationManual(STATION_SSID, STATION_PASSWORD);
-  mesh.setHostname(HOSTNAME);
-
-  userScheduler.addTask(taskSendMessage);
-  taskSendMessage.enable();
-
-  // Bridge node, should (in most cases) be a root node. See [the wiki](https://gitlab.com/painlessMesh/painlessMesh/wikis/Possible-challenges-in-mesh-formation) for some background
-  mesh.setRoot(true);
-  // This node and all other nodes should ideally know the mesh contains a root, so call this on all nodes
-  mesh.setContainsRoot(true);
-
-  myAPIP = IPAddress(mesh.getAPIP());
-
-  Serial.println("");
-  Serial.println("----------------------------");
-  Serial.print("IP address: ");
-  Serial.println(myAPIP.toString());
-  Serial.println("Make sure to connect to the AP:");
-  Serial.print("STATION_SSID: ");
-  Serial.println(STATION_SSID);
-  Serial.print("STATION_PASSWORD: ");
-  Serial.println(STATION_PASSWORD);
-  Serial.println("----------------------------");
-
-  #ifdef ENABLE_FEEDBACK_SERVER
-  server.on("/update-q-parameters", HTTP_POST, [](AsyncWebServerRequest * request) {
-    Serial.println("Received new Q-learning parameters:");
-
-    StaticJsonDocument < 4096 > doc;
-
-    if (request -> hasParam("alpha", true)) {
-      String alpha;
-      alpha = request -> getParam("alpha", true) -> value();
-      doc["alpha"] = alpha;
-      Serial.print("alpha: ");
-      Serial.print(alpha);
-    } else {
-      request -> send(400, "text/plain", "Error reading alpha from request");
-      return;
+  float max_q = 0.0f;
+  for (JsonPair kv : g_qTable[state].as<JsonObject>()) {
+    float q_value = kv.value().as<float>();
+    if (q_value > max_q) {
+      max_q = q_value;
     }
+  }
 
-    if (request -> hasParam("gamma", true)) {
-      String gamma;
-      gamma = request -> getParam("gamma", true) -> value();
-      doc["gamma"] = gamma;
-      Serial.print(", gamma: ");
-      Serial.print(gamma);
-    } else {
-      request -> send(400, "text/plain", "Error reading gamma from request");
-      return;
-    }
-
-    if (request -> hasParam("epsilon", true)) {
-      String epsilon;
-      epsilon = request -> getParam("epsilon", true) -> value();
-      doc["epsilon"] = epsilon;
-      Serial.print(", epsilon: ");
-      Serial.println(epsilon);
-    } else {
-      request -> send(400, "text/plain", "Error reading epsilon from request");
-      return;
-    }
-
-    doc["episodes"] = episodes;
-    Serial.println("Episodes: ");
-    serializeJsonPretty(episodes, Serial);
-
-    doc["q_table"] = qTable;
-    Serial.println("Q-Table: ");
-    serializeJsonPretty(qTable, Serial);
-
-    doc["accumulated_reward"] = accumulatedReward;
-    Serial.print("Accumulated reward: ");
-    Serial.println(accumulatedReward);
-
-    doc["broadcast"] = true;
-
-    // send over new calculated q parameters along with q table
-    String qParametersString;
-    serializeJsonPretty(doc, qParametersString);
-    Serial.println("About to send mf broadcast");
-    mesh.sendBroadcast(qParametersString);
-
-    request -> send(200, "application/json", "{\"status\":\"Parameters updated\"}");
-  });
-  server.begin();
-  Serial.println("Feedback server started on port 80");
-  #else
-  Serial.println("Feedback server is disabled");
-  #endif
-}
-
-void loop() {
-  // it will run the user scheduler as well
-  mesh.update();
+  return max_q;
 }
