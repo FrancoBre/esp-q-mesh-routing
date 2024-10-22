@@ -28,7 +28,6 @@
  * https://github.com/FrancoBre/esp-q-mesh-routing
  */
 
-#include "DHT.h"
 #include "painlessMesh.h"
 
 // Logging macro
@@ -46,9 +45,6 @@
 #define MESH_PASSWORD "ESP_Q_MESH_ROUTING"
 #define MESH_PORT 5555
 
-#define DPIN 4       // Pin to connect DHT sensor (GPIO number) D2
-#define DTYPE DHT11  // Define DHT 11 or DHT22 sensor type
-
 // Constants and Hyperparameters
 const unsigned long TWENTY_SECONDS_MILLIS = 20000;
 const int MAX_RETRIES = 10;
@@ -63,7 +59,7 @@ enum MessageType {
   PACKET_HOP,
   BROADCAST,
   HEALTHCHECK,
-  INITIAL_BROADCAST,
+  CALLBACK,
   UNKNOWN
 };
 
@@ -77,7 +73,7 @@ enum NodeState {
 
 // Global variables
 NodeState g_nodeState = FIRST_TIME;
-StaticJsonDocument<4096> g_qTable;
+JsonObject g_qTable;
 StaticJsonDocument<4096> g_persistentDoc;
 JsonArray g_episodes = g_persistentDoc.createNestedArray("episodes");
 String g_episodesString;
@@ -85,41 +81,53 @@ float g_accumulatedReward = 0.0;
 unsigned long g_lastSentMessage = 0;
 String g_nodeId = "MESH NOT INITIALIZED YET";
 
+// For implementing full echo
+uint32_t g_sendTimestamp;
+String g_previousNode;
+float g_estimatedTimeForCallback;
+
 // Object declarations
 Scheduler userScheduler;
 painlessMesh mesh;
-DHT dht(DPIN, DTYPE);
 
 // Function declarations
 void setup();
 void loop();
-void receivedCallback(uint32_t from, String &msg);
+void receivedMessage(uint32_t from, String &msg);
+void maybeStartNewEpisode();
+bool isTimeToManuallyStartNewEpisode();
 void startNewEpisode();
 void buildMessage(StaticJsonDocument<1024> &doc, String next_action);
 void handlePacketHop(StaticJsonDocument<1024> &doc);
 void handleBroadcast(StaticJsonDocument<1024> &doc);
-void handleInitialBroadcast();
+void handleEchoCallback(uint32_t from, StaticJsonDocument<1024> &doc);
 void handleHealthCheck();
 String getMessageTypeString(MessageType type);
 MessageType getMessageType(const String &typeStr);
 int chooseAction();
 int chooseBestAction(const JsonObject &actions,
                      const std::vector<int> &neighbors);
-void updateQTable(const String &state_from, const String &state_to,
-                  float reward, float alpha, float gamma,
-                  StaticJsonDocument<1024> &doc);
-float getMaxQValue(const String &state);
 bool sendMessageWithRetries(uint32_t next_hop, String &msg);
+unsigned long getSyncedTimeInMs();
 void extractHyperparameters(StaticJsonDocument<1024> &doc);
-void updateEpisodeRewards(JsonObject &episode);
 void createNewHop(JsonObject &episode, const String &node_from,
-                  const String &next_action, float reward);
-void prepareAndSendMessage(StaticJsonDocument<1024> &doc,
+                  const String &next_action);
+bool prepareAndSendMessage(StaticJsonDocument<1024> &doc,
                            const String &next_action);
 JsonObject findCurrentEpisode(JsonArray &episodes, int current_episode);
 void processEpisode(JsonObject &episode, StaticJsonDocument<1024> &doc);
+void updateQTableWithIncompleteInformation(int next_action,
+                                           const String &node_from,
+                                           const String &node_to,
+                                           float estimated_time_remaining,
+                                           float alpha, float gamma,
+                                           StaticJsonDocument<1024> &doc);
+float estimateRemainingTime(const String &current_node,
+                            StaticJsonDocument<1024> &doc);
 
 // Main logic functions
+Task taskSendMessage(TASK_SECOND * 10, TASK_FOREVER, &maybeStartNewEpisode);
+
 void setup() {
   Serial.begin(9600);
 
@@ -130,10 +138,13 @@ void setup() {
 
   LOG("Initializing SENDER NODE");
 
-  dht.begin();
   // mesh.setDebugMsgTypes(ERROR | STARTUP | CONNECTION);
   mesh.init(MESH_PREFIX, MESH_PASSWORD, &userScheduler, MESH_PORT);
-  mesh.onReceive(&receivedCallback);
+  mesh.onReceive(&receivedMessage);
+
+  userScheduler.addTask(taskSendMessage);
+  taskSendMessage.enable();
+
   g_nodeId = String(mesh.getNodeId());
 
   LOG("Mesh initialized successfully");
@@ -141,8 +152,44 @@ void setup() {
 
 void loop() { mesh.update(); }
 
+void startNewEpisode() {
+  LOG("Starting episode: " + String(g_currentEpisode));
+  mesh.subConnectionJson(true);
+
+  int next_action = chooseAction();
+  if (next_action == -1) {
+    LOG("No valid next action");
+    return;
+  }
+
+  StaticJsonDocument<1024> doc;
+  buildMessage(doc, String(next_action));
+
+  String jsonString;
+  serializeJsonPretty(doc, jsonString);
+  LOG("Data to send: " + jsonString);
+
+  if (!sendMessageWithRetries(next_action, jsonString)) {
+    LOG("Failed to send hop after max retries");
+  } else {
+    LOG("Message sent successfully");
+    g_nodeState = PROCESSING_EPISODE;
+  }
+}
+
+void maybeStartNewEpisode() {
+  if (g_nodeState == FIRST_TIME || isTimeToManuallyStartNewEpisode()) {
+    startNewEpisode();
+  }
+}
+
+bool isTimeToManuallyStartNewEpisode() {
+  return (getSyncedTimeInMs() - g_lastSentMessage >= TWENTY_SECONDS_MILLIS);
+}
+
+
 // Messaging and episode handling
-void receivedCallback(uint32_t from, String &msg) {
+void receivedMessage(uint32_t from, String &msg) {
   LOG("Received message from " + String(from) + ": " + msg);
 
   StaticJsonDocument<1024> doc;
@@ -165,8 +212,8 @@ void receivedCallback(uint32_t from, String &msg) {
     case HEALTHCHECK:
       handleHealthCheck();
       break;
-    case INITIAL_BROADCAST:
-      handleInitialBroadcast();
+    case CALLBACK:
+      handleEchoCallback(from, doc);
       break;
     default:
       LOG("Received an unprocessable message type. Ignoring.");
@@ -194,109 +241,55 @@ void handlePacketHop(StaticJsonDocument<1024> &doc) {
 }
 
 void processEpisode(JsonObject &episode, StaticJsonDocument<1024> &doc) {
-  updateEpisodeRewards(episode);
-
   String node_from = doc["current_node_id"];
   String node_to = String(g_nodeId);
 
-  updateQTable(node_from, node_to, episode["reward"], g_alpha, g_gamma, doc);
-
-  createNewHop(episode, node_from, node_to, -1.0);
-
   int next_action = chooseAction();
   if (next_action == -1) {
     return;
   }
 
-  prepareAndSendMessage(doc, String(next_action));
+  float estimated_time_remaining = estimateRemainingTime(String(next_action), doc);
+
+  updateQTableWithIncompleteInformation(next_action, node_from, node_to,
+                                        estimated_time_remaining, g_alpha,
+                                        g_gamma, doc);
+
+  createNewHop(episode, node_from, node_to);
+
+  doc["type"] = "PACKET_HOP";
+  if (prepareAndSendMessage(doc, String(next_action))) {
+    g_previousNode = String(node_from);
+    g_sendTimestamp = getSyncedTimeInMs();
+    g_estimatedTimeForCallback = estimated_time_remaining;
+  }
 }
 
-void handleBroadcast(StaticJsonDocument<1024> &doc) {
-  LOG("Processing BROADCAST");
+void handleEchoCallback(uint32_t from, StaticJsonDocument<1024> &doc) {
+  float transmission_time = getSyncedTimeInMs() - g_sendTimestamp;
 
-  if (doc.containsKey("q_table")) {
-    g_qTable = doc["q_table"];
-  } else {
-    LOG("Q-table not found in the broadcast");
-  }
+  String node_from = g_nodeId;
+  String node_to = String(from);
 
-  if (doc.containsKey("alpha")) {
-    g_alpha = doc["alpha"].as<float>();
-  }
-  if (doc.containsKey("gamma")) {
-    g_gamma = doc["gamma"].as<float>();
-  }
-  if (doc.containsKey("epsilon")) {
-    g_epsilon = doc["epsilon"].as<float>();
-  }
+  updateQValueWithLatency(node_from, node_to, transmission_time,
+                          g_estimatedTimeForCallback, g_alpha, doc);
 
+  // Save episodes for new episode
   if (doc.containsKey("episodes")) {
     serializeJsonPretty(doc["episodes"], g_episodesString);
     deserializeJson(g_episodes, g_episodesString);
-  } else {
-    LOG("Episodes not found in the broadcast");
   }
 
-  if (doc.containsKey("accumulated_reward")) {
-    g_accumulatedReward = doc["accumulated_reward"].as<float>();
-  }
-
-  if (doc.containsKey("current_episode")) {
-    int newCurrentEpisode = doc["current_episode"].as<int>() + 1;
-    if (newCurrentEpisode == g_currentEpisode) {
-      LOG("Episode is stuck! Restarting the node...");
-      ESP.restart();
-    }
-    g_currentEpisode = newCurrentEpisode;
-  } else {
-    LOG("Current episode not found in the broadcast");
-  }
-
-  LOG("Broadcast processed successfully, starting next episode");
+  g_currentEpisode++;
   startNewEpisode();
 }
 
-void handleInitialBroadcast() {
-  LOG("Processing INITIAL_BROADCAST");
-
-  if (g_nodeState == FIRST_TIME) {
-    startNewEpisode();
-  } else {
-    LOG("Not in state FIRST_TIME, ignoring INITIAL_BROADCAST");
-  }
-}
-
-void startNewEpisode() {
-  LOG("Starting episode: " + String(g_currentEpisode));
-  mesh.subConnectionJson(true);
-
-  int next_action = chooseAction();
-  if (next_action == -1) {
-    LOG("No valid next action");
-    return;
-  }
-
-  StaticJsonDocument<1024> doc;
-  buildMessage(doc, String(next_action));
-
-  String jsonString;
-  serializeJsonPretty(doc, jsonString);
-  LOG("Data to send: " + jsonString);
-
-  if (!sendMessageWithRetries(next_action, jsonString)) {
-    LOG("Failed to send hop after max retries");
-  } else {
-    LOG("Message sent successfully");
-    g_nodeState = PROCESSING_EPISODE;
-  }
+void handleBroadcast(StaticJsonDocument<1024> &doc) {
+  LOG("Broadcast processed successfully");
 }
 
 void buildMessage(StaticJsonDocument<1024> &doc, String next_action) {
   doc["type"] = getMessageTypeString(PACKET_HOP);
-
-  JsonObject payload = doc.createNestedObject("payload");
-  payload["tem"] = dht.readTemperature(false);  // Read temperature
-  payload["hum"] = dht.readHumidity();          // Read humidity
 
   doc["current_node_id"] = String(g_nodeId);
 
@@ -307,7 +300,6 @@ void buildMessage(StaticJsonDocument<1024> &doc, String next_action) {
   hyperparameters["epsilon_decay"] = g_epsilonDecay;
 
   doc["current_episode"] = g_currentEpisode;
-  doc["accumulated_reward"] = g_accumulatedReward;
 
   if (g_currentEpisode != 1 && g_currentEpisode % 10 == 0) {
     deserializeJson(g_episodes, g_episodesString);
@@ -317,7 +309,6 @@ void buildMessage(StaticJsonDocument<1024> &doc, String next_action) {
 
   JsonObject episode = g_episodes.createNestedObject();
   episode["episode_number"] = g_currentEpisode;
-  episode["reward"] = 0.0;
 
   if (g_currentEpisode != 1) {
     String serializedEpisodes;
@@ -326,9 +317,11 @@ void buildMessage(StaticJsonDocument<1024> &doc, String next_action) {
   }
 
   JsonObject q_table = doc.createNestedObject("q_table");
-  for (JsonPair kv : g_qTable.as<JsonObject>()) {
+  for (JsonPair kv : g_qTable) {
     q_table[kv.key()] = kv.value();
   }
+
+  initializeOrUpdateQTable(q_table);
 
   String serializedQTable;
   serializeJson(q_table, serializedQTable);
@@ -337,7 +330,6 @@ void buildMessage(StaticJsonDocument<1024> &doc, String next_action) {
   doc["episodes"] = g_episodes;
 }
 
-// Hyperparameter and episode management
 void extractHyperparameters(StaticJsonDocument<1024> &doc) {
   g_alpha = doc["hyperparameters"]["alpha"];
   g_gamma = doc["hyperparameters"]["gamma"];
@@ -354,28 +346,17 @@ JsonObject findCurrentEpisode(JsonArray &episodes, int current_episode) {
   return JsonObject();
 }
 
-void updateEpisodeRewards(JsonObject &episode) {
-  float updatedReward =
-      ((float)episode["reward"]) - 1.00;  // Not the master node
-  episode["reward"] = String(updatedReward);
-  float accumulated_reward = ((float)episode["accumulated_reward"]) - 1.00;
-  episode["accumulated_reward"] = String(accumulated_reward);
-
-  LOG("Updated reward: " + String(updatedReward));
-}
-
 void createNewHop(JsonObject &episode, const String &node_from,
-                  const String &next_action, float reward) {
+                  const String &next_action) {
   JsonArray steps = episode["steps"];
   int hop = steps.size();
   JsonObject newHop = steps.createNestedObject();
   newHop["hop"] = hop;
   newHop["node_from"] = node_from;
   newHop["node_to"] = String(next_action);
-  newHop["reward"] = reward;
 }
 
-void prepareAndSendMessage(StaticJsonDocument<1024> &doc,
+bool prepareAndSendMessage(StaticJsonDocument<1024> &doc,
                            const String &next_action) {
   String updatedJsonString;
   serializeJson(doc, updatedJsonString);
@@ -383,10 +364,88 @@ void prepareAndSendMessage(StaticJsonDocument<1024> &doc,
   doc["type"] = "PACKET_HOP";
 
   uint32_t next_action_int = next_action.toInt();
-  sendMessageWithRetries(next_action_int, updatedJsonString);
+  return sendMessageWithRetries(next_action_int, updatedJsonString);
 }
 
 void handleHealthCheck() { LOG("healthy, Node ID: " + String(g_nodeId)); }
+
+// Q-Learning update for latency-based routing
+void updateQValueWithLatency(const String &state_from, const String &state_to,
+                             float transmission_time,
+                             float estimated_time_remaining, float alpha,
+                             StaticJsonDocument<1024> &doc) {
+  JsonObject q_table = doc["q_table"];
+
+  float current_q = q_table[state_from][state_to].as<float>();
+  LOG("Current Q-value for Q[" + state_from + "][" + state_to +
+      "]: " + String(current_q));
+  LOG("Transmission time: " + String(transmission_time));
+  LOG("Estimated remaining time: " + String(estimated_time_remaining));
+
+  float new_estimate = transmission_time + estimated_time_remaining;
+
+  float updated_q = current_q + alpha * (new_estimate - current_q);
+
+  q_table[state_from][state_to] = updated_q;
+
+  g_qTable = q_table;
+  LOG("Updated Q-value using Latency with Bellman equation: " +
+      String(updated_q));
+}
+
+void updateQTableWithIncompleteInformation(int next_action,
+                                           const String &node_from,
+                                           const String &node_to,
+                                           float estimated_time_remaining,
+                                           float alpha, float gamma,
+                                           StaticJsonDocument<1024> &doc) {
+  JsonObject q_table = doc["q_table"];
+
+  initializeOrUpdateQTable(q_table);
+
+  ensureStateExists(q_table, node_from, node_to);
+
+  // Estimate approximation of new q value with incomplete information
+  float current_q = q_table[node_from][node_to].as<float>();
+  LOG("Current Q-value for Q[" + node_from + "][" + node_to +
+      "]: " + String(current_q));
+
+  float updated_q = current_q + alpha * (estimated_time_remaining - current_q);
+
+  q_table[node_from][node_to] = updated_q;
+
+  LOG("Updated Q-value (incomplete info) for Q[" + node_from + "][" + node_to +
+      "] = " + String(updated_q));
+}
+
+float estimateRemainingTime(const String &current_node,
+                            StaticJsonDocument<1024> &doc) {
+  JsonObject q_table = doc["q_table"];
+
+  if (!q_table.containsKey(current_node)) {
+    return 99999.0;  // Valor arbitrario grande si no hay información disponible
+  }
+
+  float min_time = 99999.0;  // Valor grande para empezar la búsqueda del mínimo
+
+  // Recorrer todos los vecinos del nodo actual para encontrar el tiempo mínimo
+  // estimado
+  JsonObject actions = q_table[current_node];
+  for (JsonPair kv : actions) {
+    float q_value = kv.value().as<float>();
+
+    // Buscar el valor de Q más bajo, que representa el menor tiempo estimado
+    // hacia el destino
+    if (q_value < min_time) {
+      min_time = q_value;
+    }
+  }
+
+  // Devuelve el menor tiempo estimado para llegar al destino desde este nodo
+  LOG("Estimated remaining time from node " + current_node + ": " +
+      String(min_time));
+  return min_time;
+}
 
 String getMessageTypeString(MessageType type) {
   switch (type) {
@@ -405,26 +464,12 @@ MessageType getMessageType(const String &typeStr) {
   if (typeStr == "PACKET_HOP") return PACKET_HOP;
   if (typeStr == "BROADCAST") return BROADCAST;
   if (typeStr == "HEALTHCHECK") return HEALTHCHECK;
-  if (typeStr == "INITIAL_BROADCAST") return INITIAL_BROADCAST;
+  if (typeStr == "CALLBACK") return CALLBACK;
   return UNKNOWN;
-}
-
-// Q-Learning functions
-void updateQTable(const String &state_from, const String &state_to,
-                  float reward, float alpha, float gamma,
-                  StaticJsonDocument<1024> &doc) {
-  JsonObject q_table = doc["q_table"];
-
-  initializeOrUpdateQTable(q_table);
-
-  ensureStateExists(q_table, state_from, state_to);
-
-  updateQValue(q_table, state_from, state_to, reward, alpha, gamma);
 }
 
 void initializeOrUpdateQTable(JsonObject &q_table) {
   auto nodes = mesh.getNodeList(true);
-  LOG("Initializing Q-table with all possible states and actions...");
 
   for (auto &&id : nodes) {
     String node_from = String(id);
@@ -459,55 +504,6 @@ void ensureStateExists(JsonObject &q_table, const String &state_from,
     LOG("State to " + state_to + " not found in Q-table[" + state_from +
         "], initializing with 0.0");
   }
-}
-
-float getMaxQValue(JsonObject &q_table, const String &state_to) {
-  float maxQ = 0.0f;
-
-  if (q_table.containsKey(state_to)) {
-    JsonObject actions = q_table[state_to];
-    for (JsonPair kv : actions) {
-      float value = kv.value().as<float>();
-      if (value > maxQ) {
-        maxQ = value;
-      }
-    }
-  }
-  LOG("Max Q-value for state_to " + state_to + ": " + String(maxQ));
-  return maxQ;
-}
-
-void updateQValue(JsonObject &q_table, const String &state_from,
-                  const String &state_to, float reward, float alpha,
-                  float gamma) {
-  float currentQ = q_table[state_from][state_to].as<float>();
-  LOG("Current Q-value for Q[" + state_from + "][" + state_to +
-      "]: " + String(currentQ));
-
-  float maxQ = getMaxQValue(q_table, state_to);
-
-  float updatedQ = currentQ + alpha * (reward + gamma * maxQ - currentQ);
-  LOG("Updated Q-value using Bellman equation: " + String(updatedQ));
-
-  q_table[state_from][state_to] = updatedQ;
-  LOG("Q-table updated for Q[" + state_from + "][" + state_to +
-      "] = " + String(updatedQ));
-}
-
-float getMaxQValue(const String &state) {
-  if (!g_qTable.containsKey(state)) {
-    return 0.0f;
-  }
-
-  float max_q = 0.0f;
-  for (JsonPair kv : g_qTable[state].as<JsonObject>()) {
-    float q_value = kv.value().as<float>();
-    if (q_value > max_q) {
-      max_q = q_value;
-    }
-  }
-
-  return max_q;
 }
 
 // Choose action using epsilon-greedy strategy
@@ -560,6 +556,7 @@ bool sendMessageWithRetries(uint32_t next_hop, String &msg) {
 
   while (retryCount < MAX_RETRIES) {
     if (mesh.sendSingle(next_hop, msg)) {
+      g_lastSentMessage = getSyncedTimeInMs();
       return true;
       break;
     } else {
@@ -569,4 +566,13 @@ bool sendMessageWithRetries(uint32_t next_hop, String &msg) {
   }
 
   return false;
+}
+
+unsigned long getSyncedTimeInMs() {
+  unsigned long nodeTimeMicroseconds = mesh.getNodeTime();
+  unsigned long nodeTimeMilliseconds = nodeTimeMicroseconds / 1000;
+
+  unsigned long scaledTimeMilliseconds = nodeTimeMilliseconds / 100;
+
+  return scaledTimeMilliseconds;
 }

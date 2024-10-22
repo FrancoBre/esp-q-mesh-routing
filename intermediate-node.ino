@@ -53,7 +53,7 @@ float g_gamma;         // Discount factor
 float g_epsilon;       // Exploration rate
 float g_epsilonDecay;  // Exploration decay rate
 
-enum MessageType { PACKET_HOP, BROADCAST, HEALTHCHECK, UNKNOWN };
+enum MessageType { PACKET_HOP, BROADCAST, HEALTHCHECK, CALLBACK, UNKNOWN };
 
 enum NodeState { PROCESSING_EPISODE, EXPLOITATION_PHASE };
 
@@ -63,6 +63,11 @@ StaticJsonDocument<4096> g_qTable;
 StaticJsonDocument<4096> g_persistentDoc;
 float g_accumulatedReward = 0.0;
 String g_nodeId = "MESH NOT INITIALIZED YET";
+
+// For implementing full echo
+uint32_t g_sendTimestamp;
+String g_previousNode;
+float g_estimatedTimeForCallback;
 
 // Objects declarations
 Scheduler userScheduler;
@@ -74,23 +79,23 @@ void loop();
 void receivedCallback(uint32_t from, String &msg);
 void handlePacketHop(StaticJsonDocument<1024> &doc);
 void handleBroadcast(StaticJsonDocument<1024> &doc);
+void handleEchoCallback(uint32_t from, StaticJsonDocument<1024> &doc);
 void handleHealthCheck();
 MessageType getMessageType(const String &typeStr);
 int chooseAction();
 int chooseBestAction(const JsonObject &actions,
                      const std::vector<int> &neighbors);
-void updateQTable(const String &state_from, const String &state_to,
-                  float reward, float alpha, float gamma,
-                  StaticJsonDocument<1024> &doc);
 bool sendMessageWithRetries(uint32_t next_hop, String &msg);
+unsigned long getSyncedTimeInMs();
 void extractHyperparameters(StaticJsonDocument<1024> &doc);
-void updateEpisodeRewards(JsonObject &episode);
 void createNewHop(JsonObject &episode, const String &node_from,
-                  const String &next_action, float reward);
-void prepareAndSendMessage(StaticJsonDocument<1024> &doc,
+                  const String &next_action);
+bool prepareAndSendMessage(StaticJsonDocument<1024> &doc,
                            const String &next_action);
 JsonObject findCurrentEpisode(JsonArray &episodes, int current_episode);
 void processEpisode(JsonObject &episode, StaticJsonDocument<1024> &doc);
+float estimateRemainingTime(const String &current_node,
+                            StaticJsonDocument<1024> &doc);
 
 // Main logic functions
 void setup() {
@@ -137,6 +142,9 @@ void receivedCallback(uint32_t from, String &msg) {
     case HEALTHCHECK:
       handleHealthCheck();
       break;
+    case CALLBACK:
+      handleEchoCallback(from, doc);
+      break;
     default:
       LOG("Unknown message type");
       break;
@@ -163,47 +171,46 @@ void handlePacketHop(StaticJsonDocument<1024> &doc) {
 }
 
 void processEpisode(JsonObject &episode, StaticJsonDocument<1024> &doc) {
-  updateEpisodeRewards(episode);
-
   String node_from = doc["current_node_id"];
   String node_to = String(g_nodeId);
-
-  updateQTable(node_from, node_to, episode["reward"], g_alpha, g_gamma, doc);
-
-  createNewHop(episode, node_from, node_to, -1.0);
 
   int next_action = chooseAction();
   if (next_action == -1) {
     return;
   }
 
-  prepareAndSendMessage(doc, String(next_action));
+  float estimated_time_remaining =
+      estimateRemainingTime(String(next_action), doc);
+
+  updateQTableWithIncompleteInformation(next_action, node_from, node_to,
+                                        estimated_time_remaining, g_alpha,
+                                        g_gamma, doc);
+
+  createNewHop(episode, node_from, node_to);
+
+  doc["type"] = "PACKET_HOP";
+  if (prepareAndSendMessage(doc, String(next_action))) {
+    g_previousNode = String(node_from);
+    g_sendTimestamp = getSyncedTimeInMs();
+    g_estimatedTimeForCallback = estimated_time_remaining;
+  }
 }
 
 void handleBroadcast(StaticJsonDocument<1024> &doc) {
-  LOG("Processing BROADCAST");
-
-  if (doc.containsKey("q_table")) {
-    g_qTable = doc["q_table"];
-  }
-
-  if (doc.containsKey("alpha")) {
-    g_alpha = doc["alpha"].as<float>();
-  }
-
-  if (doc.containsKey("gamma")) {
-    g_gamma = doc["gamma"].as<float>();
-  }
-
-  if (doc.containsKey("epsilon")) {
-    g_epsilon = doc["epsilon"].as<float>();
-  }
-
-  if (doc.containsKey("accumulated_reward")) {
-    g_accumulatedReward = doc["accumulated_reward"].as<float>();
-  }
-
   LOG("Broadcast processed successfully");
+}
+
+void handleEchoCallback(uint32_t from, StaticJsonDocument<1024> &doc) {
+  float transmission_time = getSyncedTimeInMs() - g_sendTimestamp;
+
+  String node_from = String(g_nodeId);
+  String node_to = g_previousNode;
+
+  updateQValueWithLatency(node_from, node_to, transmission_time,
+                          g_estimatedTimeForCallback, g_alpha, doc);
+
+  doc["type"] = "CALLBACK";
+  prepareAndSendMessage(doc, g_previousNode);
 }
 
 // Hyperparameter and episode management
@@ -223,39 +230,97 @@ JsonObject findCurrentEpisode(JsonArray &episodes, int current_episode) {
   return JsonObject();
 }
 
-void updateEpisodeRewards(JsonObject &episode) {
-  float updatedReward =
-      ((float)episode["reward"]) - 1.00;  // Not the master node
-  episode["reward"] = String(updatedReward);
-  float accumulated_reward = ((float)episode["accumulated_reward"]) - 1.00;
-  episode["accumulated_reward"] = String(accumulated_reward);
-
-  LOG("Updated reward: " + String(updatedReward));
-}
-
 void createNewHop(JsonObject &episode, const String &node_from,
-                  const String &next_action, float reward) {
+                  const String &next_action) {
   JsonArray steps = episode["steps"];
   int hop = steps.size();
   JsonObject newHop = steps.createNestedObject();
   newHop["hop"] = hop;
   newHop["node_from"] = node_from;
   newHop["node_to"] = String(next_action);
-  newHop["reward"] = reward;
 }
 
-void prepareAndSendMessage(StaticJsonDocument<1024> &doc,
+bool prepareAndSendMessage(StaticJsonDocument<1024> &doc,
                            const String &next_action) {
   String updatedJsonString;
   serializeJson(doc, updatedJsonString);
   g_qTable = doc["q_table"];
-  doc["type"] = "PACKET_HOP";
 
   uint32_t next_action_int = next_action.toInt();
-  sendMessageWithRetries(next_action_int, updatedJsonString);
+  return sendMessageWithRetries(next_action_int, updatedJsonString);
 }
 
 void handleHealthCheck() { LOG("healthy, Node ID: " + g_nodeId); }
+
+// Q-Learning update for latency-based routing
+void updateQValueWithLatency(const String &state_from, const String &state_to,
+                             float transmission_time,
+                             float estimated_time_remaining, float alpha,
+                             StaticJsonDocument<1024> &doc) {
+  JsonObject q_table = doc["q_table"];
+
+  float current_q = q_table[state_from][state_to].as<float>();
+  LOG("Current Q-value for Q[" + state_from + "][" + state_to +
+      "]: " + String(current_q));
+
+  float new_estimate = transmission_time + estimated_time_remaining;
+
+  float updated_q = current_q + alpha * (new_estimate - current_q);
+  q_table[state_from][state_to] = updated_q;
+
+  LOG("Updated Q-value using Latency with Bellman equation: " +
+      String(updated_q));
+}
+
+void updateQTableWithIncompleteInformation(int next_action,
+                                           const String &node_from,
+                                           const String &node_to,
+                                           float estimated_time_remaining,
+                                           float alpha, float gamma,
+                                           StaticJsonDocument<1024> &doc) {
+  JsonObject q_table = doc["q_table"];
+
+  float current_q = q_table[node_from][node_to].as<float>();
+  LOG("Current Q-value for Q[" + node_from + "][" + node_to +
+      "]: " + String(current_q));
+
+  float updated_q = current_q + alpha * (estimated_time_remaining - current_q);
+
+  q_table[node_from][node_to] = updated_q;
+
+  LOG("Updated Q-value (incomplete info) for Q[" + node_from + "][" + node_to +
+      "] = " + String(updated_q));
+}
+
+float estimateRemainingTime(const String &current_node,
+                            StaticJsonDocument<1024> &doc) {
+  JsonObject q_table = doc["q_table"];
+
+  // Asegúrate de que el nodo actual esté en la Q-table
+  if (!q_table.containsKey(current_node)) {
+    return 99999.0;  // Valor arbitrario grande si no hay información disponible
+  }
+
+  float min_time = 99999.0;  // Valor grande para empezar la búsqueda del mínimo
+
+  // Recorrer todos los vecinos del nodo actual para encontrar el tiempo mínimo
+  // estimado
+  JsonObject actions = q_table[current_node];
+  for (JsonPair kv : actions) {
+    float q_value = kv.value().as<float>();
+
+    // Buscar el valor de Q más bajo, que representa el menor tiempo estimado
+    // hacia el destino
+    if (q_value < min_time) {
+      min_time = q_value;
+    }
+  }
+
+  // Devuelve el menor tiempo estimado para llegar al destino desde este nodo
+  LOG("Estimated remaining time from node " + current_node + ": " +
+      String(min_time));
+  return min_time;
+}
 
 MessageType getMessageType(const String &typeStr) {
   if (typeStr == "PACKET_HOP") return PACKET_HOP;
@@ -265,21 +330,8 @@ MessageType getMessageType(const String &typeStr) {
 }
 
 // Q-Learning functions
-void updateQTable(const String &state_from, const String &state_to,
-                  float reward, float alpha, float gamma,
-                  StaticJsonDocument<1024> &doc) {
-  JsonObject q_table = doc["q_table"];
-
-  initializeOrUpdateQTable(q_table);
-
-  ensureStateExists(q_table, state_from, state_to);
-
-  updateQValue(q_table, state_from, state_to, reward, alpha, gamma);
-}
-
 void initializeOrUpdateQTable(JsonObject &q_table) {
   auto nodes = mesh.getNodeList(true);
-  LOG("Initializing Q-table with all possible states and actions...");
 
   for (auto &&id : nodes) {
     String node_from = String(id);
@@ -424,4 +476,13 @@ bool sendMessageWithRetries(uint32_t next_hop, String &msg) {
   }
 
   return false;
+}
+
+unsigned long getSyncedTimeInMs() {
+  unsigned long nodeTimeMicroseconds = mesh.getNodeTime();
+  unsigned long nodeTimeMilliseconds = nodeTimeMicroseconds / 1000;
+
+  unsigned long scaledTimeMilliseconds = nodeTimeMilliseconds / 100;
+
+  return scaledTimeMilliseconds;
 }
