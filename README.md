@@ -102,7 +102,7 @@ Where `434939008` and `434960473` are the nodes in the network, and the actions 
 
 Also, incorporate one or more than one `intermediate nodes` to the network as needed. The more intermediate nodes you have, the more useful the learning results will be.
 
-Flash `sender-node.ino`, `intermediate-node.ino` and `master-node.ino` respectively using Arduino IDE. Also, required dependencies are `painlessMesh`, `TaskScheduler`, `ArduinoJson` and `AsyncTCP`.
+Flash `sender-node.ino`, `intermediate-node.ino` and `receiver-node.ino` (master) respectively using Arduino IDE. Also, required dependencies are `painlessMesh`, `TaskScheduler`, `ArduinoJson` and `AsyncTCP`.
 There are plenty of tutorials online on how to program an ESP8266, but if you are too lazy to search, [here](https://www.youtube.com/watch?v=lQm3YKkXPNc)'s one.
 
 Once you have flashed the nodes, do the following:
