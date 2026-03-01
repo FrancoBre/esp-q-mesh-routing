@@ -28,6 +28,9 @@
  * https://github.com/FrancoBre/esp-q-mesh-routing
  */
 
+#include <ArduinoJson.h>
+#include <vector>
+
 #include "painlessMesh.h"
 
 // Logging macro
@@ -50,10 +53,8 @@ const unsigned long TWENTY_SECONDS_MILLIS = 20000;
 const int MAX_RETRIES = 10;
 const int MAX_EPISODES = 100;
 const float STEP_TIME = 1.0f;      // Fallback when send_timestamp missing
-const float INITIAL_Q = 2000.0f;   // High initial = unexplored (lower Q = better path)
+const float INITIAL_Q = 0.0f;
 float g_eta = 0.7f;               // Learning rate
-float g_epsilon = 0.1f;            // Exploration rate
-float g_epsilonDecay = 0.1f;       // Exploration decay rate
 int g_currentEpisode = 1;
 
 enum MessageType {
@@ -71,9 +72,9 @@ enum NodeState {
 
 // Global variables
 NodeState g_nodeState = FIRST_TIME;
-JsonObject g_qTable;
 StaticJsonDocument<4096> g_persistentDoc;
 JsonArray g_episodes = g_persistentDoc.createNestedArray("episodes");
+JsonObject g_qTable = g_persistentDoc.createNestedObject("q_table");
 String g_episodesString;
 float g_accumulatedReward = 0.0;
 unsigned long g_lastSentMessage = 0;
@@ -94,7 +95,7 @@ void buildMessage(StaticJsonDocument<1024> &doc, String next_action);
 void handlePacketHop(StaticJsonDocument<1024> &doc);
 String getMessageTypeString(MessageType type);
 MessageType getMessageType(const String &typeStr);
-int chooseAction();
+std::vector<int> getNeighbors();
 int chooseBestAction(const JsonObject &actions,
                      const std::vector<int> &neighbors);
 bool sendMessageWithRetries(uint32_t next_hop, String &msg);
@@ -111,10 +112,11 @@ void updateQTableForwardOnly(int next_action,
                              const String &node_to,
                              float time_in_queue,
                              float step_time,
-                             float min_next_q,
+                             float t,
                              StaticJsonDocument<1024> &doc);
 float estimateRemainingTime(const String &current_node,
                             StaticJsonDocument<1024> &doc);
+void copyQTableToPersistent(JsonObject src);
 
 // Main logic functions
 Task taskSendMessage(TASK_SECOND * 10, TASK_FOREVER, &maybeStartNewEpisode);
@@ -147,14 +149,18 @@ void startNewEpisode() {
   LOG("Starting episode: " + String(g_currentEpisode));
   mesh.subConnectionJson(true);
 
-  int next_action = chooseAction();
+  StaticJsonDocument<1024> doc;
+  buildMessage(doc, "");
+  std::vector<int> neighbors = getNeighbors();
+  if (neighbors.empty()) {
+    LOG("No neighbors found");
+    return;
+  }
+  int next_action = chooseBestAction(doc["q_table"][g_nodeId], neighbors);
   if (next_action == -1) {
     LOG("No valid next action");
     return;
   }
-
-  StaticJsonDocument<1024> doc;
-  buildMessage(doc, String(next_action));
 
   String jsonString;
   serializeJsonPretty(doc, jsonString);
@@ -220,12 +226,16 @@ void processEpisode(JsonObject &episode, StaticJsonDocument<1024> &doc) {
   String node_from = doc["current_node_id"];
   String node_to = String(g_nodeId);
 
-  int next_action = chooseAction();
+  std::vector<int> neighbors = getNeighbors();
+  if (neighbors.empty()) return;
+  int next_action = chooseBestAction(doc["q_table"][g_nodeId], neighbors);
   if (next_action == -1) {
     return;
   }
 
-  float min_next_q = estimateRemainingTime(String(next_action), doc);
+  // ΔQ_x(d,y) = η((q + s + t) - Q_x(d,y))
+  // We update Q(node_from, us) = link that was traversed. t = our estimate (we're receiver y)
+  float t = estimateRemainingTime(g_nodeId, doc);
   // Queues are handled by the TCP stack; we don't have access to that data
   float time_in_queue = 0.0f;
 
@@ -236,7 +246,7 @@ void processEpisode(JsonObject &episode, StaticJsonDocument<1024> &doc) {
   }
 
   updateQTableForwardOnly(next_action, node_from, node_to, time_in_queue,
-                          step_time, min_next_q, doc);
+                          step_time, t, doc);
 
   createNewHop(episode, node_from, node_to);
 
@@ -251,13 +261,28 @@ void buildMessage(StaticJsonDocument<1024> &doc, String next_action) {
 
   JsonObject hyperparameters = doc.createNestedObject("hyperparameters");
   hyperparameters["eta"] = g_eta;
-  hyperparameters["epsilon"] = g_epsilon;
-  hyperparameters["epsilon_decay"] = g_epsilonDecay;
 
   doc["current_episode"] = g_currentEpisode;
 
   if (g_currentEpisode != 1 && g_currentEpisode % 10 == 0) {
-    deserializeJson(g_episodes, g_episodesString);
+    StaticJsonDocument<4096> tempDoc;
+    if (!deserializeJson(tempDoc, g_episodesString)) {
+      JsonArray arr = tempDoc.as<JsonArray>();
+      while (g_episodes.size() > 0) g_episodes.remove(0);
+      for (JsonObject ep : arr) {
+        JsonObject newEp = g_episodes.createNestedObject();
+        newEp["episode_number"] = ep["episode_number"];
+        JsonArray steps = newEp.createNestedArray("steps");
+        if (ep.containsKey("steps")) {
+          for (JsonObject step : ep["steps"].as<JsonArray>()) {
+            JsonObject newStep = steps.createNestedObject();
+            newStep["hop"] = step["hop"];
+            newStep["node_from"] = step["node_from"];
+            newStep["node_to"] = step["node_to"];
+          }
+        }
+      }
+    }
   } else {
     serializeJson(g_episodes, g_episodesString);
   }
@@ -272,8 +297,11 @@ void buildMessage(StaticJsonDocument<1024> &doc, String next_action) {
   }
 
   JsonObject q_table = doc.createNestedObject("q_table");
-  for (JsonPair kv : g_qTable) {
-    q_table[kv.key()] = kv.value();
+  for (JsonPair kv_from : g_qTable) {
+    JsonObject inner = q_table.createNestedObject(kv_from.key().c_str());
+    for (JsonPair kv_to : kv_from.value().as<JsonObject>()) {
+      inner[kv_to.key().c_str()] = kv_to.value().as<float>();
+    }
   }
 
   initializeOrUpdateQTable(q_table);
@@ -292,12 +320,6 @@ void extractHyperparameters(StaticJsonDocument<1024> &doc) {
     g_eta = doc["hyperparameters"]["eta"];
   } else if (doc["hyperparameters"].containsKey("alpha")) {
     g_eta = doc["hyperparameters"]["alpha"];  // Backward compat
-  }
-  if (doc["hyperparameters"].containsKey("epsilon")) {
-    g_epsilon = doc["hyperparameters"]["epsilon"];
-  }
-  if (doc["hyperparameters"].containsKey("epsilon_decay")) {
-    g_epsilonDecay = doc["hyperparameters"]["epsilon_decay"];
   }
 }
 
@@ -323,24 +345,23 @@ void createNewHop(JsonObject &episode, const String &node_from,
 bool prepareAndSendMessage(StaticJsonDocument<1024> &doc,
                            const String &next_action) {
   doc["send_timestamp"] = mesh.getNodeTime();  // For next hop to compute step_time
+  copyQTableToPersistent(doc["q_table"]);
   String updatedJsonString;
   serializeJson(doc, updatedJsonString);
-  g_qTable = doc["q_table"];
   doc["type"] = "PACKET_HOP";
 
   uint32_t next_action_int = next_action.toInt();
   return sendMessageWithRetries(next_action_int, updatedJsonString);
 }
 
-// Q-Routing forward-only update
-// target = timeInQueue + step_time + minNextQ
-// newQ = oldQ + ETA * (target - oldQ)
+// Q-Routing update: ΔQ_x(d,y) = η((q + s + t) - Q_x(d,y))
+// We update Q(node_from, node_to) = link traversed. t = receiver's estimate.
 void updateQTableForwardOnly(int next_action,
                              const String &node_from,
                              const String &node_to,
                              float time_in_queue,
                              float step_time,
-                             float min_next_q,
+                             float t,
                              StaticJsonDocument<1024> &doc) {
   JsonObject q_table = doc["q_table"];
 
@@ -348,12 +369,12 @@ void updateQTableForwardOnly(int next_action,
   ensureStateExists(q_table, node_from, node_to);
 
   float old_q = q_table[node_from][node_to].as<float>();
-  float target = time_in_queue + step_time + min_next_q;
+  float target = time_in_queue + step_time + t;
   float delta = g_eta * (target - old_q);
   float new_q = old_q + delta;
 
   q_table[node_from][node_to] = new_q;
-  g_qTable = q_table;
+  copyQTableToPersistent(q_table);
 
   LOG("Q-update [from=" + node_from + " to=" + node_to + "] old=" +
       String(old_q) + " target=" + String(target) + " new=" + String(new_q));
@@ -364,25 +385,19 @@ float estimateRemainingTime(const String &current_node,
   JsonObject q_table = doc["q_table"];
 
   if (!q_table.containsKey(current_node)) {
-    return 99999.0;  // Valor arbitrario grande si no hay información disponible
+    return 99999.0;  // Large number when no information available
   }
 
-  float min_time = 99999.0;  // Valor grande para empezar la búsqueda del mínimo
+  float min_time = 99999.0;  // Start high to find minimum
 
-  // Recorrer todos los vecinos del nodo actual para encontrar el tiempo mínimo
-  // estimado
   JsonObject actions = q_table[current_node];
   for (JsonPair kv : actions) {
     float q_value = kv.value().as<float>();
-
-    // Buscar el valor de Q más bajo, que representa el menor tiempo estimado
-    // hacia el destino
     if (q_value < min_time) {
       min_time = q_value;
     }
   }
 
-  // Devuelve el menor tiempo estimado para llegar al destino desde este nodo
   LOG("Estimated remaining time from node " + current_node + ": " +
       String(min_time));
   return min_time;
@@ -420,6 +435,20 @@ void initializeOrUpdateQTable(JsonObject &q_table) {
   }
 }
 
+void copyQTableToPersistent(JsonObject src) {
+  for (JsonPair kv_from : src) {
+    JsonObject inner;
+    if (g_qTable.containsKey(kv_from.key().c_str())) {
+      inner = g_qTable[kv_from.key().c_str()];
+    } else {
+      inner = g_qTable.createNestedObject(kv_from.key().c_str());
+    }
+    for (JsonPair kv_to : kv_from.value().as<JsonObject>()) {
+      inner[kv_to.key().c_str()] = kv_to.value().as<float>();
+    }
+  }
+}
+
 void ensureStateExists(JsonObject &q_table, const String &state_from,
                        const String &state_to) {
   if (!q_table.containsKey(state_from)) {
@@ -434,29 +463,16 @@ void ensureStateExists(JsonObject &q_table, const String &state_from,
   }
 }
 
-// Choose action using epsilon-greedy strategy
-int chooseAction() {
+std::vector<int> getNeighbors() {
   auto nodes = mesh.getNodeList(false);
   std::vector<int> neighbors;
   for (const auto &id : nodes) {
     neighbors.push_back(id);
   }
-
-  if (neighbors.empty()) {
-    LOG("No neighbors found");
-    return -1;
-  }
-
-  if (random(0, 100) < g_epsilon * 100) {
-    int action_index = random(0, neighbors.size());
-    return neighbors[action_index];  // Explore
-  } else {
-    // Exploit: choose action with the highest Q-value
-    return chooseBestAction(g_qTable[g_nodeId], neighbors);
-  }
+  return neighbors;
 }
 
-// Helper function to choose the best action (exploit)
+// Choose neighbor with minimum Q-value (greedy)
 // Q-Routing: lower Q = better path (faster delivery), so choose minimum
 int chooseBestAction(const JsonObject &actions,
                      const std::vector<int> &neighbors) {
@@ -472,8 +488,8 @@ int chooseBestAction(const JsonObject &actions,
   }
 
   if (best_action == -1) {
-    LOG("No valid actions for exploitation found. Defaulting to exploration.");
-    return neighbors[random(0, neighbors.size())];
+    LOG("No valid actions found.");
+    return -1;
   }
 
   return best_action;
@@ -487,11 +503,9 @@ bool sendMessageWithRetries(uint32_t next_hop, String &msg) {
     if (mesh.sendSingle(next_hop, msg)) {
       g_lastSentMessage = getSyncedTimeInMs();
       return true;
-      break;
-    } else {
-      retryCount++;
-      delay(100);
     }
+    retryCount++;
+    delay(100);
   }
 
   return false;

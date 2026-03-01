@@ -1,142 +1,175 @@
-# Mesh Routing with Q-Learning
+# Mesh Routing with Q-Routing (TD(0))
 
-This project implements a mesh network routing system using Q-Learning. The goal is to solve a routing problem in a mesh network using reinforcement learning, implemented with ESP devices. The main objective is to optimize the route from a `sender node`, streaming sensor data obtained with a DHT11 to a `master node` (which is the node that's connected to a server, which is connected to a router), minimizing the number of hops required to reach it.
+This project implements a mesh network routing system using **Q-Routing** as described in Boyan & Littman (1994), *Packet Routing in Dynamically Changing Networks: A Reinforcement Learning Approach*. The algorithm uses **TD(0) temporal-difference updates** to minimize packet delivery time. Implemented with ESP devices and the painlessMesh library.
 
-![infrastructure (1)](https://github.com/user-attachments/assets/3d4fac86-66f3-4d0a-aa06-6f3a00470c4f)
+Each ESP device handles packet reception and transmission in the mesh network. The routing logic minimizes **estimated delivery time**. Q-values represent the estimated time to deliver a packet to the destination via each neighbor—**lower Q means a better path**.
 
-Each ESP device will be flashed with software to handle packet reception and transmission in the mesh network, and to implement the Q-Learning algorithm. Each time an ESP receives a packet, it will update the Q-table, which has states defined by the current node and the set of neighboring nodes (obtained through the painlessMesh library).
+## Node Roles
 
-The actions in the Q-table will consist of sending the packet to one of the neighboring nodes. At each hop, the Q-table will be updated using an ε-greedy algorithm. The reward for the algorithm will be -1 for each hop that does not reach the master node and +100 when the node is reached. This way, we aim to optimize the use of the mesh network by minimizing the number of hops required to reach the central server.
+| Role | File | Behavior |
+|------|------|----------|
+| **Sender** | `sender-node.ino` | Sends packets on a timer, chooses first hop, forwards packets |
+| **Intermediate** | `intermediate-node.ino` | Forwards packets, updates Q-table at each hop |
+| **Receiver** | `receiver-node.ino` | Packet destination; receives and logs delivery |
 
-## How does the learning work
+```mermaid
+sequenceDiagram
+    participant Sender
+    participant Intermediate
+    participant Receiver
+    participant Middleware
+    participant Server
 
-Here’s a step-by-step explanation of how the learning process works:
+    Note over Sender: Choose neighbor (greedy, min Q)
+    Sender->>Sender: Build PACKET_HOP with q_table, send_timestamp
+    Sender->>Intermediate: Send data + Q-learning data
 
-1. **Initialization**: 
-   - Each node starts with an empty Q-table. The Q-table maps states (neighboring nodes) to actions (hops to neighboring nodes) with corresponding Q-values.
-   - The Q-learning parameters include the learning rate (alpha), discount factor (gamma), and exploration rate (epsilon).
+    Note over Intermediate: Compute step_time from send_timestamp
+    Note over Intermediate: Update Q(node_from, us): ΔQ = η((q+s+t)−Q)
+    Note over Intermediate: Choose next hop (greedy, min Q)
+    Intermediate->>Receiver: Forward PACKET_HOP
 
-2. **Receiving a Hop**: 
-   - When a node receives a hop, it uses its Q-table to decide the next hop.
-   - The decision is based on two strategies:
-     - **Exploit (1 - epsilon)**: Choose the neighboring node with the highest Q-value.
-     - **Explore (epsilon)**: Randomly choose a neighboring node to explore new paths.
+    Note over Receiver: Packet delivered
+    Receiver->>Receiver: Serial: DELIVERY_DATA: + JSON
+    Receiver->>Middleware: USB Serial (receiver connected to PC)
+    Middleware->>Middleware: Extract JSON, parse
+    Middleware->>Server: POST /data (JSON)
+    Note over Server: Store, serve topology, hop count, delivery data
+    Note over Server: http://localhost:5000
 
-3. **Updating the Q-table**: 
-   - Each time a hop is forwarded, the Q-table is updated using the bellman equation.
+    Note over Sender: Timeout → send next packet
+```
 
-4. **Reward System**: 
-   - For every hop that does not reach the master node, the node receives a reward of -1.
-   - When the hop reaches the master node, the node receives a reward of +100.
+**Forward-only flow:** No backward propagation. Q-updates happen at each hop when forwarding. Receiver does not broadcast; sender sends packets on a timer.
 
-5. **Finding and Broadcasting of Optimal Q-Parameters**:
-   - When the hop reaches the master node, the middleware reads the episode results and sends the current Q parameters (alpha, gamma, epsilon) to a genetic algorithm, in order to find the optimal parameters.
-   - Then, the middleware sends the Q parameters back to the master node, which then broadcasts the updated Q-table and the Q parameters to all nodes in the network.
-   - This is done for a number of episodes, to separate the learning phase from the exploitation phase.
-   - This ensures all nodes have the latest learning results, allowing them to make informed decisions on the best hop.
+**Visualization (optional):** When the receiver is connected via USB to a PC, it outputs `DELIVERY_DATA:` + JSON on Serial. The middleware reads this, extracts the JSON, and forwards it to the visualization server. Open http://localhost:5000 for topology, hop count per delivered packet, and delivery data.
 
-![sender-intermediate-master](https://github.com/user-attachments/assets/af65e433-a2b9-45f8-bbc7-f9211c1d41ca)
+## How the Learning Works
 
-6. **Middleware and Server**:
-   - A middleware script running on a PC reads the serial monitor output from the master node, tries to find the optimal Q-Parameters with a genetic algorithm and sends relevant learning results to a server.
-   - The server receives learning data, logs it, and visualizes it in a web interface for analysis.
+### Q-Values
 
-![image](https://github.com/user-attachments/assets/34c1f5fb-ae6e-44ec-bc56-7ddf2e542efa)
+- **Q(from, to)** = estimated time to deliver a packet from the current node to the destination via neighbor `to`
+- **Lower Q** = faster path = better choice
 
-![image](https://github.com/user-attachments/assets/65875361-88aa-44a0-b7fa-ce49bf133b04)
+### Update Rule (Boyan & Littman 1994)
 
-This setup ensures that all nodes in the network have the latest learning results, allowing them to make informed decisions on the best hop to optimize packet routing.
+When a packet arrives from node `x` and we forward it, we update the link that was traversed:
 
-## Message structure
+```
+ΔQ_x(d,y) = η × ((q + s + t) - Q_x(d,y))
+```
 
-Messages sent across nodes have the following structure:
+Where:
+- **q** = time in queue (0). AsyncTCP exposes only send-buffer info (`space()`, `canSend()`), not receive queue size or per-packet queue delay. painlessMesh does not expose the underlying TCP connections. We cannot measure queue time without an application-level queue.
+- **s** = transmission time (measured via `send_timestamp` in the packet)
+- **t** = our estimate of remaining time = min over our neighbors of Q(us, neighbor)
+- **η** = learning rate (eta, default 0.7)
+
+### Action Selection
+
+- **Greedy:** Always choose the neighbor with the **minimum** Q-value
+
+### Flow
+
+1. **Sender** sends a packet, picks first hop, sends `PACKET_HOP` with `send_timestamp`
+2. **Intermediate** receives, computes step_time from `send_timestamp`, updates Q(node_from, us), picks next hop, forwards
+3. **Receiver** receives; packet is delivered (no further action)
+4. **Sender** sends the next packet after a timeout (no callback)
+
+## Message Structure
+
+Only **PACKET_HOP** messages are used. Structure:
 
 ```json
 {
-    "payload": {
-       "tem": 28.1,
-       "hum": 70.2
-    },
+    "type": "PACKET_HOP",
     "current_node_id": "434960473",
-    "q_parameters": {
-        "alpha": "0.1",
-        "gamma": "0.9",
-        "epsilon": "0.1",
-        "epsilon_decay": "0.1"
+    "send_timestamp": 12345678,
+    "hyperparameters": {
+        "eta": 0.7
     },
     "current_episode": 1,
     "accumulated_reward": 0,
-    "total_time": 0,
     "episodes": [
         {
             "episode_number": 1,
-            "reward": "0100",
-            "time": 0,
             "steps": [
                 {
                     "hop": 0,
-                    "node_from": "434939008"
+                    "node_from": "434939008",
                     "node_to": "434960473"
                 }
             ]
         }
     ],
     "q_table": {
-        "434939008": {
-            "434960473": 10
-        },
-        "434960473": {
-            "434939008": 0
-        }
+        "434939008": { "434960473": 0.5 },
+        "434960473": { "434939008": 0.3 }
     }
 }
 ```
 
-Where `434939008` and `434960473` are the nodes in the network, and the actions are to hop to node `434939008` and `434960473` respectively.
+- **send_timestamp** (µs): Used by the receiver to compute actual transmission time
+- **q_table**: Q(from, to) = estimated delivery time; lower = better
+- **episodes** (legacy naming): Tracks delivered packets; each entry = one path (steps) from sender to receiver
 
 ## Setup
 
-2 ESP8266 devices are required for the mesh network:
- - One `sender node`.
- - And a `master node`.
+**Hardware:** 2+ ESP8266 devices (sender, receiver, and optionally intermediate nodes)
 
-Also, incorporate one or more than one `intermediate nodes` to the network as needed. The more intermediate nodes you have, the more useful the learning results will be.
+**Dependencies:** `painlessMesh`, `TaskScheduler`, `ArduinoJson`, `AsyncTCP`
 
-Flash `sender-node.ino`, `intermediate-node.ino` and `receiver-node.ino` (master) respectively using Arduino IDE. Also, required dependencies are `painlessMesh`, `TaskScheduler`, `ArduinoJson` and `AsyncTCP`.
-There are plenty of tutorials online on how to program an ESP8266, but if you are too lazy to search, [here](https://www.youtube.com/watch?v=lQm3YKkXPNc)'s one.
+### Build
 
-Once you have flashed the nodes, do the following:
-
-1. Run the server in which the learning data is received to be visualized and analyzed.
+**PlatformIO** (recommended):
 ```bash
-$ cd learning-visualization-server
-$ python3 server.py
-```
-This will run a server in `localhost:5000`. Required pip dependencies are `Flask` `plotly` and `pandas`.
-
-2. Run the middleware that grabs the results of the learning process.
-```bash
-$ cd ..
-$ cd learning-results-grabbing
-$ python3 middleware.py
+pio run -e sender      # Build sender firmware
+pio run -e intermediate # Build intermediate firmware
+pio run -e receiver    # Build receiver firmware
 ```
 
-3. Plug the master node (the serial port device in the code is assumed to be `/dev/ttyUSB0`, change as needed).
+**Arduino IDE:** Each sketch must be in its own folder with a matching name (e.g. `sender-node/sender-node.ino`). Copy the corresponding `.ino` file into a new folder and open it.
 
-4. Connect to the AP lifted by the master node with the following credentials: `STATION_SSID: whateverYouLike`, `STATION_PASSWORD: somethingSneaky`.
+### Flash
 
-5. Plug the sender node and the intermediate nodes for the learning to start.
+- `sender-node.ino` → sender node
+- `intermediate-node.ino` → intermediate nodes
+- `receiver-node.ino` → receiver (destination) node
 
-6. Enter the learning visualization server to analyze results: `http://localhost:5000`
+1. Flash all nodes
+2. Power on the receiver first, then intermediate(s), then sender
+3. The sender sends packets on a timer; packets flow sender → intermediate(s) → receiver
+
+### Visualization (optional)
+
+Connect the **receiver** via USB to a PC to visualize learning progress:
+
+```bash
+# Terminal 1: Start visualization server
+cd learning-visualization-server && pip install -r requirements.txt && python server.py
+
+# Terminal 2: Start middleware (receiver connected via USB)
+cd learning-results-grabbing && pip install -r requirements.txt && python middleware.py --verbose
+```
+
+Open http://localhost:5000 for topology, hop count per delivered packet, and delivery data.
+
+## Configuration
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `eta` | 0.7 | Learning rate |
+| `INITIAL_Q` | 0.0 | Initial Q-value (lower = better) |
+
+## References
+
+- Boyan, J. A., & Littman, M. L. (1994). *Packet Routing in Dynamically Changing Networks: A Reinforcement Learning Approach*
+- [meshroutingframework](https://github.com/yourusername/meshroutingframework) — Java simulation with the same Q-routing logic
+
+## Demos
 
 Demo 1:
 [![Watch the video](https://raw.githubusercontent.com/FrancoBre/q-mesh-routing/master/assets/thumbnail.jpeg)](https://youtu.be/WYOyJp7k9bQ)
 
 Demo 2:
 [![Watch the video](https://github.com/user-attachments/assets/88dddd2a-fdf8-4cbd-a961-f1f22c596134)](https://youtu.be/fHp0AZggZRo)
-
-## Next Steps
-
-Test with more nodes to tweak learning parameters, or create a simulation with more nodes to do so.
-
-Create a better demo.
