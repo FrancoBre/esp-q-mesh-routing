@@ -154,6 +154,9 @@ cd learning-results-grabbing && pip install -r requirements.txt && python middle
 
 Open http://localhost:5000 for topology, hop count per delivered packet, and delivery data.
 
+<img width="1693" height="1782" alt="image" src="https://github.com/user-attachments/assets/d002593c-ff9e-46f1-88b0-68cf9f6cd054" />
+
+
 ## Configuration
 
 | Parameter | Default | Description |
