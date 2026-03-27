@@ -115,30 +115,99 @@ Only **PACKET_HOP** messages are used. Structure:
 
 ## Setup
 
-**Hardware:** 2+ ESP8266 devices (sender, receiver, and optionally intermediate nodes)
+### Hardware
 
-**Dependencies:** `painlessMesh`, `TaskScheduler`, `ArduinoJson`, `AsyncTCP`
+- 2+ ESP8266 devices
+  - `sender-node.ino` → sender
+  - `intermediate-node.ino` → intermediate
+  - `receiver-node.ino` → receiver
+- Micro-USB data cable
+- Linux machine with `arduino-cli`
 
-### Build
+### Arduino CLI setup on Linux
 
-**PlatformIO** (recommended):
+Install `arduino-cli` and configure the ESP8266 core:
+
 ```bash
-pio run -e sender      # Build sender firmware
-pio run -e intermediate # Build intermediate firmware
-pio run -e receiver    # Build receiver firmware
+$ arduino-cli config init
 ```
 
-**Arduino IDE:** Each sketch must be in its own folder with a matching name (e.g. `sender-node/sender-node.ino`). Copy the corresponding `.ino` file into a new folder and open it.
+Edit `~/.arduino15/arduino-cli.yaml` and add:
 
-### Flash
+```yaml
+board_manager:
+  additional_urls:
+    - https://arduino.esp8266.com/stable/package_esp8266com_index.json
+```
 
-- `sender-node.ino` → sender node
-- `intermediate-node.ino` → intermediate nodes
-- `receiver-node.ino` → receiver (destination) node
+Then install the ESP8266 core:
 
-1. Flash all nodes
-2. Power on the receiver first, then intermediate(s), then sender
-3. The sender sends packets on a timer; packets flow sender → intermediate(s) → receiver
+```bash
+$ arduino-cli core update-index
+$ arduino-cli core install esp8266:esp8266
+```
+
+Install required libraries:
+
+```bash
+$ arduino-cli lib update-index
+$ arduino-cli lib install "Painless Mesh"
+$ arduino-cli lib install TaskScheduler
+$ arduino-cli lib install ESPAsyncTCP
+$ arduino-cli lib install ArduinoJson
+```
+
+## Detect the board
+
+Connect the ESP8266 through USB and verify that the OS detects it:
+
+```bash
+$ lsusb
+$ arduino-cli board list
+```
+
+A NodeMCU board typically appears as something like:
+
+```bash
+$ /dev/ttyUSB0 serial Serial Port (USB)
+```
+
+## Compile
+
+For NodeMCU ESP8266, use:
+
+```bash
+$ arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 ./sender-node
+$ arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 ./intermediate-node
+$ arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 ./receiver-node
+```
+
+## Upload
+
+Upload each sketch to the corresponding board:
+
+```bash
+$ arduino-cli upload -p /dev/ttyUSB0 --fqbn esp8266:esp8266:nodemcuv2 ./sender-node
+$ arduino-cli upload -p /dev/ttyUSB0 --fqbn esp8266:esp8266:nodemcuv2 ./intermediate-node
+$ arduino-cli upload -p /dev/ttyUSB0 --fqbn esp8266:esp8266:nodemcuv2 ./receiver-node
+```
+
+## Serial monitoring
+
+To inspect logs from a node, use arduino-cli monitor.
+
+Example for baudrate 9600:
+
+```bash
+$ arduino-cli monitor -p /dev/ttyUSB0 -c baudrate=9600
+```
+## Network bring-up order
+
+1. Power on the receiver
+2. Power on any intermediate nodes
+3. Power on the sender
+
+The sender transmits packets periodically, intermediate nodes forward them and update Q-values, and the receiver logs deliveries.
 
 ### Visualization (optional)
 
