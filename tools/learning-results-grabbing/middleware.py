@@ -102,6 +102,7 @@ def main():
                 if DELIVERY_MARKER in line:
                     log_data = extract_json(line)
                     if log_data:
+                        log_data['received_at'] = time.time()
                         if verbose:
                             print("Extracted JSON, forwarding to server")
                         log_to_file(line)

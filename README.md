@@ -10,7 +10,7 @@ Each ESP device handles packet reception and transmission in the mesh network. T
 |------|----------|
 | `firmware/` | ESP8266 sketches—one folder per node (folder name = main `.ino` basename for Arduino CLI) |
 | `data/` | LittleFS image source (sender): `injection-schedule.json` — upload with PlatformIO `uploadfs` |
-| `tools/` | Host-side Python: serial middleware and visualization server |
+| `tools/` | Host-side Python: serial middleware (`learning-results-grabbing`) and real-time visualization server (`learning-visualization-server`) |
 | `docs/` | Additional documentation |
 
 ## Node Roles
@@ -43,7 +43,7 @@ sequenceDiagram
     Receiver->>Middleware: USB Serial (receiver connected to PC)
     Middleware->>Middleware: Extract JSON, parse
     Middleware->>Server: POST /data (JSON)
-    Note over Server: Store, serve topology, hop count, delivery data
+    Note over Server: Real-time debugger: topology, Q-heatmap, convergence, packet table
     Note over Server: http://localhost:5000
 
     Note over Sender: Config: FLASH / periodic / load-level → inject
@@ -51,7 +51,7 @@ sequenceDiagram
 
 **Forward-only flow:** No backward propagation. Q-updates happen at each hop when forwarding. Receiver does not broadcast. The sender’s **injection schedule** (LittleFS JSON) selects **PHYSICAL_BUTTON_DRIVEN** (FLASH on GPIO0), **PERIODIC** (one packet every `tick_ms`), or **LOAD_LEVEL** (expected `load_level` packets per `tick_ms`, stochastic rounding). If the file is missing or invalid, defaults match **PHYSICAL_BUTTON_DRIVEN**.
 
-**Visualization (optional):** When the receiver is connected via USB to a PC, it outputs `DELIVERY_DATA:` + JSON on Serial. The middleware reads this, extracts the JSON, and forwards it to the visualization server. Open http://localhost:5000 for topology, hop count per delivered packet, and delivery data.
+**Visualization (optional):** When the receiver is connected via USB to a PC, it outputs `DELIVERY_DATA:` + JSON on Serial. The middleware reads this, extracts the JSON, and forwards it to the visualization server. Open http://localhost:5000 for the real-time Q-Routing Debugger — topology, learning curves, Q-table heatmap, convergence tracking, packet details, and event log, all updating live via SSE.
 
 ## How the Learning Works
 
@@ -239,7 +239,7 @@ The sender injects packets per **`data/injection-schedule.json`** (e.g. FLASH, p
 
 ### Visualization (optional)
 
-Connect the **receiver** via USB to a PC to visualize learning progress:
+Connect the **receiver** via USB to a PC to visualize learning progress in real time:
 
 ```bash
 # Terminal 1: Start visualization server
@@ -249,9 +249,22 @@ cd tools/learning-visualization-server && pip install -r requirements.txt && pyt
 cd tools/learning-results-grabbing && pip install -r requirements.txt && python middleware.py --verbose
 ```
 
-Open http://localhost:5000 for topology, hop count per delivered packet, and delivery data.
+Open http://localhost:5000 for the **Q-Routing Debugger** — a real-time dashboard with six views:
 
-<img width="1693" height="1782" alt="image" src="https://github.com/user-attachments/assets/d002593c-ff9e-46f1-88b0-68cf9f6cd054" />
+| View | What it shows |
+|------|---------------|
+| **Network Topology** | Directed graph with Q-value edge labels. Green edges = preferred next-hop (argmin Q). Blue = latest packet path. Red = loop edges. Sender (diamond), receiver (square) visually distinct. Short node labels (A-F), full ID on hover. |
+| **Hop Count (Learning Curve)** | Hops per packet with rolling average (window=5). Green markers = clean delivery, red = loop detected. Dashed line at y=1 shows theoretical optimum. |
+| **Convergence** | max |delta Q| per event on log scale. Trends toward zero as learning stabilizes. Dashed threshold at 0.01. |
+| **Q-Table Heatmap** | NxN grid (from/to) colored by Q-value intensity. Shows which edges have been explored and current value landscape. |
+| **Packet Details** | Table with packet #, hop count, loop flag, path (short labels), and ESP timestamp. Newest first. |
+| **Event Log** | Last 20 raw events for debugging data flow. |
+
+The dashboard updates automatically via Server-Sent Events (SSE) — no browser refresh needed. A status bar shows live packet count, loop count, latest/average hops, max |dQ|, and SSE connection state.
+
+On restart, the server replays `received_data.log` to rebuild state, so no data is lost between sessions.
+
+![Q-Routing Debugger](assets/server.png)
 
 
 ## Configuration
