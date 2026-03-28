@@ -1,7 +1,14 @@
 #include "injection_config.h"
 
+#include <ArduinoJson.h>
 #include <LittleFS.h>
 #include <cmath>
+
+#if ARDUINOJSON_VERSION_MAJOR >= 7
+#define INJECTION_JSON_DOC JsonDocument injectionJsonDoc(768)
+#else
+#define INJECTION_JSON_DOC StaticJsonDocument<768> injectionJsonDoc
+#endif
 
 InjectionConfigContext InjectionConfigContext::defaults() {
   InjectionConfigContext c;
@@ -45,13 +52,13 @@ bool loadInjectionConfigFromLittleFS(InjectionConfigContext &out) {
   String raw = f.readString();
   f.close();
 
-  StaticJsonDocument<768> doc;
-  DeserializationError err = deserializeJson(doc, raw);
+  INJECTION_JSON_DOC;
+  DeserializationError err = deserializeJson(injectionJsonDoc, raw);
   if (err) {
     return false;
   }
 
-  JsonObject sched = doc["injection_schedule"];
+  JsonObject sched = injectionJsonDoc["injection_schedule"];
   if (sched.isNull()) {
     return false;
   }
