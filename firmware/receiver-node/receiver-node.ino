@@ -45,6 +45,10 @@
 #define MESH_PASSWORD "ESP_Q_MESH_ROUTING"
 #define MESH_PORT 5555
 
+#ifndef PACKET_JSON_CAPACITY
+#define PACKET_JSON_CAPACITY 8192
+#endif
+
 const float STEP_TIME = 1.0f;
 const float INITIAL_Q = 0.0f;
 float g_eta = 0.7f;
@@ -59,9 +63,9 @@ painlessMesh mesh;
 void setup();
 void loop();
 void receivedCallback(uint32_t from, String &msg);
-void handlePacketHop(StaticJsonDocument<1024> &doc);
+void handlePacketHop(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
 MessageType getMessageType(const String &typeStr);
-void extractHyperparameters(StaticJsonDocument<1024> &doc);
+void extractHyperparameters(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
 JsonObject findCurrentEpisode(JsonArray &episodes, int current_episode);
 void createNewHop(JsonObject &episode, const String &node_from,
                   const String &node_to);
@@ -70,10 +74,11 @@ void updateQTableForwardOnly(const String &node_from,
                              float time_in_queue,
                              float step_time,
                              float t,
-                             StaticJsonDocument<1024> &doc);
+                             StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
 void ensureStateExists(JsonObject &q_table, const String &state_from,
                        const String &state_to);
-void emitDeliveryData(StaticJsonDocument<1024> &doc);
+void initializeOrUpdateQTable(JsonObject &q_table);
+void emitDeliveryData(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
 
 void setup() {
   Serial.begin(9600);
@@ -97,7 +102,7 @@ void loop() { mesh.update(); }
 void receivedCallback(uint32_t from, String &msg) {
   LOG("Received message from " + String(from) + ": " + msg);
 
-  StaticJsonDocument<1024> doc;
+  StaticJsonDocument<PACKET_JSON_CAPACITY> doc;
   DeserializationError error = deserializeJson(doc, msg);
 
   if (error) {
@@ -111,7 +116,7 @@ void receivedCallback(uint32_t from, String &msg) {
   }
 }
 
-void handlePacketHop(StaticJsonDocument<1024> &doc) {
+void handlePacketHop(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
   LOG("Processing PACKET_HOP — delivery at destination");
 
   extractHyperparameters(doc);
@@ -147,7 +152,7 @@ void handlePacketHop(StaticJsonDocument<1024> &doc) {
   emitDeliveryData(doc);
 }
 
-void emitDeliveryData(StaticJsonDocument<1024> &doc) {
+void emitDeliveryData(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
   String jsonStr;
   serializeJson(doc, jsonStr);
   Serial.println("DELIVERY_DATA:" + jsonStr);
@@ -155,7 +160,7 @@ void emitDeliveryData(StaticJsonDocument<1024> &doc) {
   LOG("Packet marked received; DELIVERY_DATA emitted (no forward)");
 }
 
-void extractHyperparameters(StaticJsonDocument<1024> &doc) {
+void extractHyperparameters(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
   if (doc["hyperparameters"].containsKey("eta")) {
     g_eta = doc["hyperparameters"]["eta"];
   } else if (doc["hyperparameters"].containsKey("alpha")) {
@@ -187,9 +192,10 @@ void updateQTableForwardOnly(const String &node_from,
                              float time_in_queue,
                              float step_time,
                              float t,
-                             StaticJsonDocument<1024> &doc) {
+                             StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
   JsonObject q_table = doc["q_table"];
 
+  initializeOrUpdateQTable(q_table);
   ensureStateExists(q_table, node_from, node_to);
 
   float old_q = q_table[node_from][node_to].as<float>();
@@ -210,6 +216,26 @@ void ensureStateExists(JsonObject &q_table, const String &state_from,
   }
   if (!q_table[state_from].containsKey(state_to)) {
     q_table[state_from][state_to] = INITIAL_Q;
+  }
+}
+
+void initializeOrUpdateQTable(JsonObject &q_table) {
+  auto nodes = mesh.getNodeList(true);
+
+  for (auto &&id : nodes) {
+    String from = String(id);
+    for (auto &&id_2 : nodes) {
+      String to = String(id_2);
+
+      if (id_2 != id) {
+        if (!q_table.containsKey(from)) {
+          q_table.createNestedObject(from);
+        }
+        if (!q_table[from].containsKey(to)) {
+          q_table[from][to] = INITIAL_Q;
+        }
+      }
+    }
   }
 }
 

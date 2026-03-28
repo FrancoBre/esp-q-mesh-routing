@@ -49,6 +49,10 @@
 #define MESH_PASSWORD "ESP_Q_MESH_ROUTING"
 #define MESH_PORT 5555
 
+#ifndef PACKET_JSON_CAPACITY
+#define PACKET_JSON_CAPACITY 8192
+#endif
+
 // NodeMCU / most ESP8266 devkits: FLASH button → GPIO0 (active LOW). Short press injects a packet.
 #ifndef FLASH_BUTTON_PIN
 #define FLASH_BUTTON_PIN 0
@@ -81,7 +85,7 @@ enum NodeState {
 
 // Global variables
 NodeState g_nodeState = FIRST_TIME;
-StaticJsonDocument<4096> g_persistentDoc;
+StaticJsonDocument<8192> g_persistentDoc;
 JsonArray g_episodes = g_persistentDoc.createNestedArray("episodes");
 JsonObject g_qTable = g_persistentDoc.createNestedObject("q_table");
 String g_episodesString;
@@ -100,30 +104,30 @@ void pollScheduledInjection();
 void logInjectionConfig();
 void applyInjectionRngSeed();
 void startNewEpisode();
-void buildMessage(StaticJsonDocument<1024> &doc, String next_action);
-void handlePacketHop(StaticJsonDocument<1024> &doc);
+void buildMessage(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc, String next_action);
+void handlePacketHop(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
 String getMessageTypeString(MessageType type);
 MessageType getMessageType(const String &typeStr);
 std::vector<int> getNeighbors();
 int chooseBestAction(const JsonObject &actions,
                      const std::vector<int> &neighbors);
 bool sendMessageWithRetries(uint32_t next_hop, String &msg);
-void extractHyperparameters(StaticJsonDocument<1024> &doc);
+void extractHyperparameters(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
 void createNewHop(JsonObject &episode, const String &node_from,
                   const String &next_action);
-bool prepareAndSendMessage(StaticJsonDocument<1024> &doc,
+bool prepareAndSendMessage(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc,
                            const String &next_action);
 JsonObject findCurrentEpisode(JsonArray &episodes, int current_episode);
-void processEpisode(JsonObject &episode, StaticJsonDocument<1024> &doc);
+void processEpisode(JsonObject &episode, StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
 void updateQTableForwardOnly(int next_action,
                              const String &node_from,
                              const String &node_to,
                              float time_in_queue,
                              float step_time,
                              float t,
-                             StaticJsonDocument<1024> &doc);
+                             StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
 float estimateRemainingTime(const String &current_node,
-                            StaticJsonDocument<1024> &doc);
+                            StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
 void copyQTableToPersistent(JsonObject src);
 
 void setup() {
@@ -249,7 +253,7 @@ void startNewEpisode() {
   LOG("Starting episode: " + String(g_currentEpisode));
   mesh.subConnectionJson(true);
 
-  StaticJsonDocument<1024> doc;
+  StaticJsonDocument<PACKET_JSON_CAPACITY> doc;
   buildMessage(doc, "");
   std::vector<int> neighbors = getNeighbors();
   if (neighbors.empty()) {
@@ -279,7 +283,7 @@ void startNewEpisode() {
 void receivedMessage(uint32_t from, String &msg) {
   LOG("Received message from " + String(from) + ": " + msg);
 
-  StaticJsonDocument<1024> doc;
+  StaticJsonDocument<PACKET_JSON_CAPACITY> doc;
   DeserializationError error = deserializeJson(doc, msg);
 
   if (error) {
@@ -293,7 +297,7 @@ void receivedMessage(uint32_t from, String &msg) {
   }
 }
 
-void handlePacketHop(StaticJsonDocument<1024> &doc) {
+void handlePacketHop(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
   LOG("Processing PACKET_HOP");
 
   extractHyperparameters(doc);
@@ -311,7 +315,7 @@ void handlePacketHop(StaticJsonDocument<1024> &doc) {
   }
 }
 
-void processEpisode(JsonObject &episode, StaticJsonDocument<1024> &doc) {
+void processEpisode(JsonObject &episode, StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
   String node_from = doc["current_node_id"];
   String node_to = String(g_nodeId);
 
@@ -343,7 +347,7 @@ void processEpisode(JsonObject &episode, StaticJsonDocument<1024> &doc) {
   prepareAndSendMessage(doc, String(next_action));
 }
 
-void buildMessage(StaticJsonDocument<1024> &doc, String next_action) {
+void buildMessage(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc, String next_action) {
   doc["type"] = getMessageTypeString(PACKET_HOP);
 
   doc["current_node_id"] = String(g_nodeId);
@@ -354,7 +358,7 @@ void buildMessage(StaticJsonDocument<1024> &doc, String next_action) {
   doc["current_episode"] = g_currentEpisode;
 
   if (g_currentEpisode != 1 && g_currentEpisode % 10 == 0) {
-    StaticJsonDocument<4096> tempDoc;
+    StaticJsonDocument<8192> tempDoc;
     if (!deserializeJson(tempDoc, g_episodesString)) {
       JsonArray arr = tempDoc.as<JsonArray>();
       while (g_episodes.size() > 0) g_episodes.remove(0);
@@ -404,7 +408,7 @@ void buildMessage(StaticJsonDocument<1024> &doc, String next_action) {
   doc["send_timestamp"] = mesh.getNodeTime();  // For next hop to compute step_time
 }
 
-void extractHyperparameters(StaticJsonDocument<1024> &doc) {
+void extractHyperparameters(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
   if (doc["hyperparameters"].containsKey("eta")) {
     g_eta = doc["hyperparameters"]["eta"];
   } else if (doc["hyperparameters"].containsKey("alpha")) {
@@ -431,7 +435,7 @@ void createNewHop(JsonObject &episode, const String &node_from,
   newHop["node_to"] = String(next_action);
 }
 
-bool prepareAndSendMessage(StaticJsonDocument<1024> &doc,
+bool prepareAndSendMessage(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc,
                            const String &next_action) {
   doc["current_node_id"] = String(g_nodeId);
   doc["send_timestamp"] = mesh.getNodeTime();  // For next hop to compute step_time
@@ -452,7 +456,7 @@ void updateQTableForwardOnly(int next_action,
                              float time_in_queue,
                              float step_time,
                              float t,
-                             StaticJsonDocument<1024> &doc) {
+                             StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
   JsonObject q_table = doc["q_table"];
 
   initializeOrUpdateQTable(q_table);
@@ -471,7 +475,7 @@ void updateQTableForwardOnly(int next_action,
 }
 
 float estimateRemainingTime(const String &current_node,
-                            StaticJsonDocument<1024> &doc) {
+                            StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
   JsonObject q_table = doc["q_table"];
 
   if (!q_table.containsKey(current_node)) {
