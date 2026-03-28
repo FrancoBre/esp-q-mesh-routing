@@ -4,12 +4,6 @@
 #include <LittleFS.h>
 #include <cmath>
 
-#if ARDUINOJSON_VERSION_MAJOR >= 7
-#define INJECTION_JSON_DOC JsonDocument injectionJsonDoc(768)
-#else
-#define INJECTION_JSON_DOC StaticJsonDocument<768> injectionJsonDoc
-#endif
-
 InjectionConfigContext InjectionConfigContext::defaults() {
   InjectionConfigContext c;
   c.mode = InjectionMode::PhysicalButtonDriven;
@@ -52,7 +46,11 @@ bool loadInjectionConfigFromLittleFS(InjectionConfigContext &out) {
   String raw = f.readString();
   f.close();
 
-  INJECTION_JSON_DOC;
+#if ARDUINOJSON_VERSION_MAJOR >= 7
+  JsonDocument injectionJsonDoc;
+#else
+  StaticJsonDocument<768> injectionJsonDoc;
+#endif
   DeserializationError err = deserializeJson(injectionJsonDoc, raw);
   if (err) {
     return false;
