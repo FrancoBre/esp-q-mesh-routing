@@ -31,6 +31,7 @@
 #include <ArduinoJson.h>
 #include <vector>
 
+#include "injection_config.h"
 #include "painlessMesh.h"
 
 // Logging macro
@@ -48,8 +49,16 @@
 #define MESH_PASSWORD "ESP_Q_MESH_ROUTING"
 #define MESH_PORT 5555
 
+// NodeMCU / most ESP8266 devkits: FLASH button → GPIO0 (active LOW). Short press injects a packet.
+#ifndef FLASH_BUTTON_PIN
+#define FLASH_BUTTON_PIN 0
+#endif
+const unsigned long FLASH_DEBOUNCE_MS = 300;
+const int MAX_INJECT_PER_TICK = 32;
+
+InjectionConfigContext g_injection_config;
+
 // Constants and Hyperparameters
-const unsigned long TWENTY_SECONDS_MILLIS = 20000;
 const int MAX_RETRIES = 10;
 const int MAX_EPISODES = 100;
 const float STEP_TIME = 1.0f;      // Fallback when send_timestamp missing
@@ -76,7 +85,6 @@ StaticJsonDocument<4096> g_persistentDoc;
 JsonArray g_episodes = g_persistentDoc.createNestedArray("episodes");
 JsonObject g_qTable = g_persistentDoc.createNestedObject("q_table");
 String g_episodesString;
-unsigned long g_lastSentMessage = 0;
 String g_nodeId = "MESH NOT INITIALIZED YET";
 
 // Object declarations
@@ -87,8 +95,10 @@ painlessMesh mesh;
 void setup();
 void loop();
 void receivedMessage(uint32_t from, String &msg);
-void maybeStartNewEpisode();
-bool isTimeToManuallyStartNewEpisode();
+void pollFlashButton();
+void pollScheduledInjection();
+void logInjectionConfig();
+void applyInjectionRngSeed();
 void startNewEpisode();
 void buildMessage(StaticJsonDocument<1024> &doc, String next_action);
 void handlePacketHop(StaticJsonDocument<1024> &doc);
@@ -98,7 +108,6 @@ std::vector<int> getNeighbors();
 int chooseBestAction(const JsonObject &actions,
                      const std::vector<int> &neighbors);
 bool sendMessageWithRetries(uint32_t next_hop, String &msg);
-unsigned long getSyncedTimeInMs();
 void extractHyperparameters(StaticJsonDocument<1024> &doc);
 void createNewHop(JsonObject &episode, const String &node_from,
                   const String &next_action);
@@ -117,9 +126,6 @@ float estimateRemainingTime(const String &current_node,
                             StaticJsonDocument<1024> &doc);
 void copyQTableToPersistent(JsonObject src);
 
-// Main logic functions
-Task taskSendMessage(TASK_SECOND * 10, TASK_FOREVER, &maybeStartNewEpisode);
-
 void setup() {
   Serial.begin(9600);
 
@@ -129,20 +135,115 @@ void setup() {
   }
 
   LOG("Initializing SENDER NODE");
+  pinMode(FLASH_BUTTON_PIN, INPUT_PULLUP);
+
+  if (!loadInjectionConfigFromLittleFS(g_injection_config)) {
+    g_injection_config = InjectionConfigContext::defaults();
+    LOG("Injection schedule: using defaults (LittleFS missing or invalid " +
+        String(INJECTION_SCHEDULE_JSON_PATH) + ")");
+  } else {
+    LOG("Injection schedule: loaded from LittleFS");
+  }
+  applyInjectionRngSeed();
+  logInjectionConfig();
 
   // mesh.setDebugMsgTypes(ERROR | STARTUP | CONNECTION);
   mesh.init(MESH_PREFIX, MESH_PASSWORD, &userScheduler, MESH_PORT);
   mesh.onReceive(&receivedMessage);
 
-  userScheduler.addTask(taskSendMessage);
-  taskSendMessage.enable();
-
   g_nodeId = String(mesh.getNodeId());
 
-  LOG("Mesh initialized successfully");
+  if (g_injection_config.mode == InjectionMode::PhysicalButtonDriven) {
+    LOG("Mesh ready — press FLASH (GPIO " + String(FLASH_BUTTON_PIN) +
+        ") to inject a packet");
+  } else {
+    LOG("Mesh ready — scheduled injection (tick_ms=" +
+        String(g_injection_config.tick_ms) + ")");
+  }
 }
 
-void loop() { mesh.update(); }
+void loop() {
+  mesh.update();
+  if (g_injection_config.mode == InjectionMode::PhysicalButtonDriven) {
+    pollFlashButton();
+  } else {
+    pollScheduledInjection();
+  }
+}
+
+void applyInjectionRngSeed() {
+  if (g_injection_config.seed != 0) {
+    randomSeed(g_injection_config.seed);
+  } else {
+    randomSeed(ESP.getChipId() ^ (uint32_t)micros());
+  }
+}
+
+void logInjectionConfig() {
+  const char *modeStr = "?";
+  switch (g_injection_config.mode) {
+    case InjectionMode::PhysicalButtonDriven:
+      modeStr = "PHYSICAL_BUTTON_DRIVEN";
+      break;
+    case InjectionMode::LoadLevel:
+      modeStr = "LOAD_LEVEL";
+      break;
+    case InjectionMode::Periodic:
+      modeStr = "PERIODIC";
+      break;
+  }
+  LOG(String("injection_schedule: mode=") + modeStr +
+      " tick_ms=" + String(g_injection_config.tick_ms) +
+      " load_level=" + String(g_injection_config.load_level) +
+      " seed=" + String(g_injection_config.seed));
+}
+
+void pollScheduledInjection() {
+  static unsigned long last_tick_ms = 0;
+  static bool primed = false;
+  unsigned long now = millis();
+  if (!primed) {
+    last_tick_ms = now;
+    primed = true;
+    return;
+  }
+  if (now - last_tick_ms < g_injection_config.tick_ms) {
+    return;
+  }
+  last_tick_ms = now;
+
+  if (g_injection_config.mode == InjectionMode::Periodic) {
+    LOG("Periodic tick — injecting one packet");
+    startNewEpisode();
+    return;
+  }
+  if (g_injection_config.mode == InjectionMode::LoadLevel) {
+    int n = computeStochasticInjectCount(g_injection_config.load_level);
+    if (n > MAX_INJECT_PER_TICK) {
+      n = MAX_INJECT_PER_TICK;
+    }
+    LOG("Load-level tick — injecting " + String(n) + " packet(s)");
+    for (int i = 0; i < n; i++) {
+      startNewEpisode();
+    }
+  }
+}
+
+void pollFlashButton() {
+  static int prevLevel = HIGH;
+  static unsigned long lastFireMs = 0;
+
+  int level = digitalRead(FLASH_BUTTON_PIN);
+  unsigned long now = millis();
+  if (prevLevel == HIGH && level == LOW) {
+    if (now - lastFireMs >= FLASH_DEBOUNCE_MS) {
+      lastFireMs = now;
+      LOG("FLASH pressed — injecting packet");
+      startNewEpisode();
+    }
+  }
+  prevLevel = level;
+}
 
 void startNewEpisode() {
   LOG("Starting episode: " + String(g_currentEpisode));
@@ -173,17 +274,6 @@ void startNewEpisode() {
     g_currentEpisode++;
   }
 }
-
-void maybeStartNewEpisode() {
-  if (g_nodeState == FIRST_TIME || isTimeToManuallyStartNewEpisode()) {
-    startNewEpisode();
-  }
-}
-
-bool isTimeToManuallyStartNewEpisode() {
-  return (getSyncedTimeInMs() - g_lastSentMessage >= TWENTY_SECONDS_MILLIS);
-}
-
 
 // Messaging and episode handling
 void receivedMessage(uint32_t from, String &msg) {
@@ -501,7 +591,6 @@ bool sendMessageWithRetries(uint32_t next_hop, String &msg) {
 
   while (retryCount < MAX_RETRIES) {
     if (mesh.sendSingle(next_hop, msg)) {
-      g_lastSentMessage = getSyncedTimeInMs();
       return true;
     }
     retryCount++;
@@ -509,13 +598,4 @@ bool sendMessageWithRetries(uint32_t next_hop, String &msg) {
   }
 
   return false;
-}
-
-unsigned long getSyncedTimeInMs() {
-  unsigned long nodeTimeMicroseconds = mesh.getNodeTime();
-  unsigned long nodeTimeMilliseconds = nodeTimeMicroseconds / 1000;
-
-  unsigned long scaledTimeMilliseconds = nodeTimeMilliseconds / 100;
-
-  return scaledTimeMilliseconds;
 }

@@ -1,0 +1,8 @@
+{
+  "injection_schedule": {
+    "mode": "PHYSICAL_BUTTON_DRIVEN",
+    "tick_ms": 10000,
+    "load_level": 2.4,
+    "seed": 42
+  }
+}

@@ -9,6 +9,7 @@ Each ESP device handles packet reception and transmission in the mesh network. T
 | Path | Contents |
 |------|----------|
 | `firmware/` | ESP8266 sketches—one folder per node (folder name = main `.ino` basename for Arduino CLI) |
+| `data/` | LittleFS image source (sender): `injection-schedule.json` — upload with PlatformIO `uploadfs` |
 | `tools/` | Host-side Python: serial middleware and visualization server |
 | `docs/` | Additional documentation |
 
@@ -16,7 +17,7 @@ Each ESP device handles packet reception and transmission in the mesh network. T
 
 | Role | File | Behavior |
 |------|------|----------|
-| **Sender** | `firmware/sender-node/sender-node.ino` | Sends packets on a timer, chooses first hop, forwards packets |
+| **Sender** | `firmware/sender-node/sender-node.ino` | Packet injection schedule from LittleFS (`data/injection-schedule.json`): **FLASH** only, **periodic**, or **load-level** stochastic; then greedy first hop |
 | **Intermediate** | `firmware/intermediate-node/intermediate-node.ino` | Forwards packets, updates Q-table at each hop |
 | **Receiver** | `firmware/receiver-node/receiver-node.ino` | Packet destination; receives and logs delivery |
 
@@ -45,10 +46,10 @@ sequenceDiagram
     Note over Server: Store, serve topology, hop count, delivery data
     Note over Server: http://localhost:5000
 
-    Note over Sender: Timeout → send next packet
+    Note over Sender: Config: FLASH / periodic / load-level → inject
 ```
 
-**Forward-only flow:** No backward propagation. Q-updates happen at each hop when forwarding. Receiver does not broadcast; sender sends packets on a timer.
+**Forward-only flow:** No backward propagation. Q-updates happen at each hop when forwarding. Receiver does not broadcast. The sender’s **injection schedule** (LittleFS JSON) selects **PHYSICAL_BUTTON_DRIVEN** (FLASH on GPIO0), **PERIODIC** (one packet every `tick_ms`), or **LOAD_LEVEL** (expected `load_level` packets per `tick_ms`, stochastic rounding). If the file is missing or invalid, defaults match **PHYSICAL_BUTTON_DRIVEN**.
 
 **Visualization (optional):** When the receiver is connected via USB to a PC, it outputs `DELIVERY_DATA:` + JSON on Serial. The middleware reads this, extracts the JSON, and forwards it to the visualization server. Open http://localhost:5000 for topology, hop count per delivered packet, and delivery data.
 
@@ -82,7 +83,7 @@ Where:
 1. **Sender** sends a packet, picks first hop, sends `PACKET_HOP` with `send_timestamp`
 2. **Intermediate** receives, computes step_time from `send_timestamp`, updates Q(node_from, us), picks next hop, forwards
 3. **Receiver** receives; packet is delivered (no further action)
-4. **Sender** sends the next packet after a timeout (no callback)
+4. **Sender** injects the next packet per its schedule (button, timer, or load level — no delivery callback)
 
 ## Message Structure
 
@@ -189,6 +190,22 @@ $ arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 ./firmware/intermediate-n
 $ arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 ./firmware/receiver-node
 ```
 
+### PlatformIO (optional)
+
+From the repository root, each sketch is a separate environment (`src_dir` points at `firmware/<node>/`):
+
+```bash
+pio run -e sender -e intermediate -e receiver
+```
+
+**Sender filesystem (injection schedule):** Edit `data/injection-schedule.json`, then upload LittleFS to the **sender** board:
+
+```bash
+pio run -e sender -t uploadfs
+```
+
+If you skip `uploadfs`, the sender uses built-in defaults (FLASH-driven injection).
+
 ## Upload
 
 Upload each sketch to the corresponding board:
@@ -214,7 +231,7 @@ $ arduino-cli monitor -p /dev/ttyUSB0 -c baudrate=9600
 2. Power on any intermediate nodes
 3. Power on the sender
 
-The sender transmits packets periodically, intermediate nodes forward them and update Q-values, and the receiver logs deliveries.
+The sender injects packets per **`data/injection-schedule.json`** (e.g. FLASH, periodic, or load level); intermediate nodes forward packets and update Q-values; the receiver logs deliveries.
 
 ### Visualization (optional)
 
@@ -235,10 +252,38 @@ Open http://localhost:5000 for topology, hop count per delivered packet, and del
 
 ## Configuration
 
+### Sender: `data/injection-schedule.json` (LittleFS)
+
+Stored as JSON (same fields as a YAML `injection_schedule` block). Upload with `pio run -e sender -t uploadfs`.
+
+```json
+{
+  "injection_schedule": {
+    "mode": "PHYSICAL_BUTTON_DRIVEN",
+    "tick_ms": 10000,
+    "load_level": 2.4,
+    "seed": 42
+  }
+}
+```
+
+| Field | Meaning |
+|-------|--------|
+| `mode` | `PHYSICAL_BUTTON_DRIVEN` — inject on FLASH press. `PERIODIC` — one packet every `tick_ms`. `LOAD_LEVEL` — each `tick_ms`, inject `floor(L)` packets plus one extra with probability `L - floor(L)` (expected rate `L` per tick). |
+| `tick_ms` | Interval for `PERIODIC` / `LOAD_LEVEL` (minimum enforced in firmware: 100 ms). |
+| `load_level` | Mean packets per tick for `LOAD_LEVEL` (`L` ≥ 0). |
+| `seed` | RNG seed for load-level draws; `0` = non-reproducible seed at boot. |
+
+Per tick, load-level injection count is capped (firmware constant) to avoid flooding the mesh.
+
+### Firmware constants
+
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `eta` | 0.7 | Learning rate |
 | `INITIAL_Q` | 0.0 | Initial Q-value (lower = better) |
+| `FLASH_BUTTON_PIN` (sender) | `0` | NodeMCU FLASH → GPIO0; override if your board uses another pin (`#define` before compile) |
+| `FLASH_DEBOUNCE_MS` (sender) | `300` | Minimum time between injects on repeated edges (button mode) |
 
 ## References
 
