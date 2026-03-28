@@ -97,10 +97,10 @@ Only **PACKET_HOP** messages are used. Structure:
     "hyperparameters": {
         "eta": 0.7
     },
-    "current_episode": 1,
-    "episodes": [
+    "current_packet_id": 1,
+    "packets": [
         {
-            "episode_number": 1,
+            "packet_id": 1,
             "steps": [
                 {
                     "hop": 0,
@@ -119,7 +119,7 @@ Only **PACKET_HOP** messages are used. Structure:
 
 - **send_timestamp** (µs): Used by the receiver to compute actual transmission time
 - **q_table**: Q(from, to) = estimated delivery time; lower = better
-- **episodes** (legacy naming): Tracks delivered packets; each entry = one path (steps) from sender to receiver
+- **packets**: One object per injected packet; **packet_id** identifies it; **steps** list the hop path from sender toward the receiver
 
 ## Setup
 
@@ -232,6 +232,10 @@ $ arduino-cli monitor -p /dev/ttyUSB0 -c baudrate=9600
 3. Power on the sender
 
 The sender injects packets per **`data/injection-schedule.json`** (e.g. FLASH, periodic, or load level); intermediate nodes forward packets and update Q-values; the receiver logs deliveries.
+
+**Important:** Routing is **one-shot** over the **current** painlessMesh neighbor graph. If you inject a packet **before** the receiver has joined Wi‑Fi mesh, **no node has the receiver as a neighbor yet**, so nothing can forward to it. Wait until all nodes show up in the mesh (or follow the order above), **then** inject. A new packet after the receiver is online will work; the old packet does not wait.
+
+**Troubleshooting “receiver never sees the packet”:** (1) Confirm bring-up order — receiver on the mesh before injection. (2) Confirm the graph is connected (every node can reach every other via mesh hops). (3) If the serial log shows `Failed to parse message` on intermediates, the JSON may be too large — firmware uses an 8 KiB buffer for `PACKET_HOP` (`PACKET_JSON_CAPACITY`).
 
 ### Visualization (optional)
 

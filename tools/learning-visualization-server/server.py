@@ -16,15 +16,15 @@ app = Flask(__name__)
 data = []  # Store received JSON (delivery events)
 
 
-def hop_count(ep):
-    """Extract hop count from delivered packet (steps length)."""
-    steps = ep.get('steps', [])
+def hop_count(pkt):
+    """Extract hop count from delivered packet record (steps length)."""
+    steps = pkt.get('steps', [])
     return len(steps)
 
 
-def path_to_str(ep):
+def path_to_str(pkt):
     """Format path as node_from -> node_to -> ..."""
-    steps = ep.get('steps', [])
+    steps = pkt.get('steps', [])
     parts = []
     for s in steps:
         parts.append(str(s.get('node_from', '?')))
@@ -81,10 +81,10 @@ def index():
         packet_numbers = []
         hop_counts = []
         for entry in data:
-            packets = entry.get('episodes', [])  # legacy field: delivered packets
-            for ep in packets:
-                packet_numbers.append(ep.get('episode_number', 0))  # legacy field
-                hop_counts.append(hop_count(ep))
+            packets = entry.get('packets', entry.get('episodes', []))
+            for pkt in packets:
+                packet_numbers.append(pkt.get('packet_id', pkt.get('episode_number', 0)))
+                hop_counts.append(hop_count(pkt))
 
         if packet_numbers and hop_counts:
             fig = px.line(
@@ -103,11 +103,11 @@ def index():
         )
         for entry in data:
             node_id = entry.get('current_node_id', 'N/A')
-            packets = entry.get('episodes', [])  # legacy field: delivered packets
-            for ep in packets:
-                pkt_num = ep.get('episode_number', 'N/A')  # legacy field
-                hc = hop_count(ep)
-                path = path_to_str(ep)
+            packets = entry.get('packets', entry.get('episodes', []))
+            for pkt in packets:
+                pkt_num = pkt.get('packet_id', pkt.get('episode_number', 'N/A'))
+                hc = hop_count(pkt)
+                path = path_to_str(pkt)
                 table_html += (
                     f'<tr><td>{node_id}</td><td>{pkt_num}</td>'
                     f'<td>{hc}</td><td>{path}</td></tr>'

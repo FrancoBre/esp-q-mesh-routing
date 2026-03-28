@@ -66,8 +66,8 @@ void receivedCallback(uint32_t from, String &msg);
 void handlePacketHop(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
 MessageType getMessageType(const String &typeStr);
 void extractHyperparameters(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
-JsonObject findCurrentEpisode(JsonArray &episodes, int current_episode);
-void createNewHop(JsonObject &episode, const String &node_from,
+JsonObject findPacketById(JsonArray &packets, int current_packet_id);
+void createNewHop(JsonObject &packetRecord, const String &node_from,
                   const String &node_to);
 void updateQTableForwardOnly(const String &node_from,
                              const String &node_to,
@@ -121,13 +121,13 @@ void handlePacketHop(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
 
   extractHyperparameters(doc);
 
-  int current_episode = doc["current_episode"];
-  JsonArray receivedEpisodes = doc["episodes"];
-  JsonObject episode = findCurrentEpisode(receivedEpisodes, current_episode);
+  int current_packet_id = doc["current_packet_id"];
+  JsonArray receivedPackets = doc["packets"];
+  JsonObject packetRecord = findPacketById(receivedPackets, current_packet_id);
 
-  if (episode.isNull()) {
-    LOG("No matching episode found for current_episode: " +
-        String(current_episode));
+  if (packetRecord.isNull()) {
+    LOG("No matching packet for current_packet_id: " +
+        String(current_packet_id));
     return;
   }
 
@@ -145,7 +145,7 @@ void handlePacketHop(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
 
   updateQTableForwardOnly(node_from, node_to, time_in_queue, step_time, t, doc);
 
-  createNewHop(episode, node_from, node_to);
+  createNewHop(packetRecord, node_from, node_to);
 
   doc["current_node_id"] = g_nodeId;
   doc["type"] = "PACKET_DELIVERED";
@@ -168,18 +168,21 @@ void extractHyperparameters(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
   }
 }
 
-JsonObject findCurrentEpisode(JsonArray &episodes, int current_episode) {
-  for (JsonObject ep : episodes) {
-    if (ep["episode_number"] == current_episode) {
-      return ep;
+JsonObject findPacketById(JsonArray &packets, int current_packet_id) {
+  for (JsonObject pkt : packets) {
+    if (pkt["packet_id"] == current_packet_id) {
+      return pkt;
     }
   }
   return JsonObject();
 }
 
-void createNewHop(JsonObject &episode, const String &node_from,
+void createNewHop(JsonObject &packetRecord, const String &node_from,
                   const String &node_to) {
-  JsonArray steps = episode["steps"];
+  if (!packetRecord.containsKey("steps")) {
+    packetRecord.createNestedArray("steps");
+  }
+  JsonArray steps = packetRecord["steps"];
   int hop = steps.size();
   JsonObject newHop = steps.createNestedObject();
   newHop["hop"] = hop;

@@ -64,11 +64,10 @@ InjectionConfigContext g_injection_config;
 
 // Constants and Hyperparameters
 const int MAX_RETRIES = 10;
-const int MAX_EPISODES = 100;
 const float STEP_TIME = 1.0f;      // Fallback when send_timestamp missing
 const float INITIAL_Q = 0.0f;
 float g_eta = 0.7f;               // Learning rate
-int g_currentEpisode = 1;
+int g_packetId = 1;
 
 enum MessageType {
   PACKET_HOP,
@@ -77,18 +76,18 @@ enum MessageType {
 
 enum NodeState {
   FIRST_TIME,
-  PROCESSING_EPISODE,
-  EPISODE_FINISHED,
-  STUCK_EPISODE,
+  PROCESSING_PACKET,
+  PACKET_FINISHED,
+  STUCK_PACKET,
   EXPLOITATION_PHASE
 };
 
 // Global variables
 NodeState g_nodeState = FIRST_TIME;
 StaticJsonDocument<8192> g_persistentDoc;
-JsonArray g_episodes = g_persistentDoc.createNestedArray("episodes");
+JsonArray g_packets = g_persistentDoc.createNestedArray("packets");
 JsonObject g_qTable = g_persistentDoc.createNestedObject("q_table");
-String g_episodesString;
+String g_packetsString;
 String g_nodeId = "MESH NOT INITIALIZED YET";
 
 // Object declarations
@@ -103,7 +102,7 @@ void pollFlashButton();
 void pollScheduledInjection();
 void logInjectionConfig();
 void applyInjectionRngSeed();
-void startNewEpisode();
+void sendNewPacket();
 void buildMessage(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc, String next_action);
 void handlePacketHop(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
 String getMessageTypeString(MessageType type);
@@ -113,12 +112,12 @@ int chooseBestAction(const JsonObject &actions,
                      const std::vector<int> &neighbors);
 bool sendMessageWithRetries(uint32_t next_hop, String &msg);
 void extractHyperparameters(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
-void createNewHop(JsonObject &episode, const String &node_from,
+void createNewHop(JsonObject &packetRecord, const String &node_from,
                   const String &next_action);
 bool prepareAndSendMessage(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc,
                            const String &next_action);
-JsonObject findCurrentEpisode(JsonArray &episodes, int current_episode);
-void processEpisode(JsonObject &episode, StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
+JsonObject findPacketById(JsonArray &packets, int current_packet_id);
+void processPacket(JsonObject &packetRecord, StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
 void updateQTableForwardOnly(int next_action,
                              const String &node_from,
                              const String &node_to,
@@ -218,7 +217,7 @@ void pollScheduledInjection() {
 
   if (g_injection_config.mode == InjectionMode::Periodic) {
     LOG("Periodic tick — injecting one packet");
-    startNewEpisode();
+    sendNewPacket();
     return;
   }
   if (g_injection_config.mode == InjectionMode::LoadLevel) {
@@ -228,7 +227,7 @@ void pollScheduledInjection() {
     }
     LOG("Load-level tick — injecting " + String(n) + " packet(s)");
     for (int i = 0; i < n; i++) {
-      startNewEpisode();
+      sendNewPacket();
     }
   }
 }
@@ -243,14 +242,14 @@ void pollFlashButton() {
     if (now - lastFireMs >= FLASH_DEBOUNCE_MS) {
       lastFireMs = now;
       LOG("FLASH pressed — injecting packet");
-      startNewEpisode();
+      sendNewPacket();
     }
   }
   prevLevel = level;
 }
 
-void startNewEpisode() {
-  LOG("Starting episode: " + String(g_currentEpisode));
+void sendNewPacket() {
+  LOG("Sending new packet, packet_id=" + String(g_packetId));
   mesh.subConnectionJson(true);
 
   StaticJsonDocument<PACKET_JSON_CAPACITY> doc;
@@ -274,12 +273,12 @@ void startNewEpisode() {
     LOG("Failed to send hop after max retries");
   } else {
     LOG("Message sent successfully");
-    g_nodeState = PROCESSING_EPISODE;
-    g_currentEpisode++;
+    g_nodeState = PROCESSING_PACKET;
+    g_packetId++;
   }
 }
 
-// Messaging and episode handling
+// Messaging
 void receivedMessage(uint32_t from, String &msg) {
   LOG("Received message from " + String(from) + ": " + msg);
 
@@ -302,20 +301,20 @@ void handlePacketHop(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
 
   extractHyperparameters(doc);
 
-  int current_episode = doc["current_episode"];
+  int current_packet_id = doc["current_packet_id"];
 
-  JsonArray receivedEpisodes = doc["episodes"];
-  JsonObject episode = findCurrentEpisode(receivedEpisodes, current_episode);
+  JsonArray receivedPackets = doc["packets"];
+  JsonObject packetRecord = findPacketById(receivedPackets, current_packet_id);
 
-  if (!episode.isNull()) {
-    processEpisode(episode, doc);
+  if (!packetRecord.isNull()) {
+    processPacket(packetRecord, doc);
   } else {
-    LOG("No matching episode found for current_episode: " +
-        String(current_episode));
+    LOG("No matching packet for current_packet_id: " +
+        String(current_packet_id));
   }
 }
 
-void processEpisode(JsonObject &episode, StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
+void processPacket(JsonObject &packetRecord, StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
   String node_from = doc["current_node_id"];
   String node_to = String(g_nodeId);
 
@@ -341,7 +340,7 @@ void processEpisode(JsonObject &episode, StaticJsonDocument<PACKET_JSON_CAPACITY
   updateQTableForwardOnly(next_action, node_from, node_to, time_in_queue,
                           step_time, t, doc);
 
-  createNewHop(episode, node_from, node_to);
+  createNewHop(packetRecord, node_from, node_to);
 
   doc["type"] = "PACKET_HOP";
   prepareAndSendMessage(doc, String(next_action));
@@ -355,19 +354,19 @@ void buildMessage(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc, String next_act
   JsonObject hyperparameters = doc.createNestedObject("hyperparameters");
   hyperparameters["eta"] = g_eta;
 
-  doc["current_episode"] = g_currentEpisode;
+  doc["current_packet_id"] = g_packetId;
 
-  if (g_currentEpisode != 1 && g_currentEpisode % 10 == 0) {
+  if (g_packetId != 1 && g_packetId % 10 == 0) {
     StaticJsonDocument<8192> tempDoc;
-    if (!deserializeJson(tempDoc, g_episodesString)) {
+    if (!deserializeJson(tempDoc, g_packetsString)) {
       JsonArray arr = tempDoc.as<JsonArray>();
-      while (g_episodes.size() > 0) g_episodes.remove(0);
-      for (JsonObject ep : arr) {
-        JsonObject newEp = g_episodes.createNestedObject();
-        newEp["episode_number"] = ep["episode_number"];
-        JsonArray steps = newEp.createNestedArray("steps");
-        if (ep.containsKey("steps")) {
-          for (JsonObject step : ep["steps"].as<JsonArray>()) {
+      while (g_packets.size() > 0) g_packets.remove(0);
+      for (JsonObject pkt : arr) {
+        JsonObject newPkt = g_packets.createNestedObject();
+        newPkt["packet_id"] = pkt["packet_id"];
+        JsonArray steps = newPkt.createNestedArray("steps");
+        if (pkt.containsKey("steps")) {
+          for (JsonObject step : pkt["steps"].as<JsonArray>()) {
             JsonObject newStep = steps.createNestedObject();
             newStep["hop"] = step["hop"];
             newStep["node_from"] = step["node_from"];
@@ -377,16 +376,17 @@ void buildMessage(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc, String next_act
       }
     }
   } else {
-    serializeJson(g_episodes, g_episodesString);
+    serializeJson(g_packets, g_packetsString);
   }
 
-  JsonObject episode = g_episodes.createNestedObject();
-  episode["episode_number"] = g_currentEpisode;
+  JsonObject packetRecord = g_packets.createNestedObject();
+  packetRecord["packet_id"] = g_packetId;
+  packetRecord.createNestedArray("steps");
 
-  if (g_currentEpisode != 1) {
-    String serializedEpisodes;
-    serializeJson(g_episodes, serializedEpisodes);
-    LOG("Episodes after adding new episode: " + serializedEpisodes);
+  if (g_packetId != 1) {
+    String serializedPackets;
+    serializeJson(g_packets, serializedPackets);
+    LOG("Packets after adding new record: " + serializedPackets);
   }
 
   JsonObject q_table = doc.createNestedObject("q_table");
@@ -403,7 +403,7 @@ void buildMessage(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc, String next_act
   serializeJson(q_table, serializedQTable);
   LOG("Q-table added to the message: " + serializedQTable);
 
-  doc["episodes"] = g_episodes;
+  doc["packets"] = g_packets;
 
   doc["send_timestamp"] = mesh.getNodeTime();  // For next hop to compute step_time
 }
@@ -416,18 +416,21 @@ void extractHyperparameters(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
   }
 }
 
-JsonObject findCurrentEpisode(JsonArray &episodes, int current_episode) {
-  for (JsonObject episode : episodes) {
-    if (episode["episode_number"] == current_episode) {
-      return episode;
+JsonObject findPacketById(JsonArray &packets, int current_packet_id) {
+  for (JsonObject packetRecord : packets) {
+    if (packetRecord["packet_id"] == current_packet_id) {
+      return packetRecord;
     }
   }
   return JsonObject();
 }
 
-void createNewHop(JsonObject &episode, const String &node_from,
+void createNewHop(JsonObject &packetRecord, const String &node_from,
                   const String &next_action) {
-  JsonArray steps = episode["steps"];
+  if (!packetRecord.containsKey("steps")) {
+    packetRecord.createNestedArray("steps");
+  }
+  JsonArray steps = packetRecord["steps"];
   int hop = steps.size();
   JsonObject newHop = steps.createNestedObject();
   newHop["hop"] = hop;

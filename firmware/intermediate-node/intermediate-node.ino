@@ -60,10 +60,10 @@ float g_eta = 0.7f;               // Learning rate
 
 enum MessageType { PACKET_HOP, UNKNOWN };
 
-enum NodeState { PROCESSING_EPISODE, EXPLOITATION_PHASE };
+enum NodeState { PROCESSING_PACKET, EXPLOITATION_PHASE };
 
 // Global variables
-NodeState g_nodeState = PROCESSING_EPISODE;
+NodeState g_nodeState = PROCESSING_PACKET;
 String g_nodeId = "MESH NOT INITIALIZED YET";
 
 // Objects declarations
@@ -82,12 +82,12 @@ int chooseBestAction(const JsonObject &actions,
 bool sendMessageWithRetries(uint32_t next_hop, String &msg);
 unsigned long getSyncedTimeInMs();
 void extractHyperparameters(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
-void createNewHop(JsonObject &episode, const String &node_from,
+void createNewHop(JsonObject &packetRecord, const String &node_from,
                   const String &next_action);
 bool prepareAndSendMessage(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc,
                            const String &next_action);
-JsonObject findCurrentEpisode(JsonArray &episodes, int current_episode);
-void processEpisode(JsonObject &episode, StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
+JsonObject findPacketById(JsonArray &packets, int current_packet_id);
+void processPacket(JsonObject &packetRecord, StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
 float estimateRemainingTime(const String &current_node,
                             StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
 void updateQTableForwardOnly(int next_action,
@@ -120,7 +120,7 @@ void setup() {
 
 void loop() { mesh.update(); }
 
-// Messaging and episode handling
+// Messaging
 void receivedCallback(uint32_t from, String &msg) {
   LOG("Received message from " + String(from) + ": " + msg);
 
@@ -143,20 +143,20 @@ void handlePacketHop(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
 
   extractHyperparameters(doc);
 
-  int current_episode = doc["current_episode"];
+  int current_packet_id = doc["current_packet_id"];
 
-  JsonArray receivedEpisodes = doc["episodes"];
-  JsonObject episode = findCurrentEpisode(receivedEpisodes, current_episode);
+  JsonArray receivedPackets = doc["packets"];
+  JsonObject packetRecord = findPacketById(receivedPackets, current_packet_id);
 
-  if (!episode.isNull()) {
-    processEpisode(episode, doc);
+  if (!packetRecord.isNull()) {
+    processPacket(packetRecord, doc);
   } else {
-    LOG("No matching episode found for current_episode: " +
-        String(current_episode));
+    LOG("No matching packet for current_packet_id: " +
+        String(current_packet_id));
   }
 }
 
-void processEpisode(JsonObject &episode, StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
+void processPacket(JsonObject &packetRecord, StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
   JsonObject q_table = doc["q_table"];
   initializeOrUpdateQTable(q_table);
 
@@ -185,13 +185,13 @@ void processEpisode(JsonObject &episode, StaticJsonDocument<PACKET_JSON_CAPACITY
   updateQTableForwardOnly(next_action, node_from, node_to, time_in_queue,
                           step_time, t, doc);
 
-  createNewHop(episode, node_from, node_to);
+  createNewHop(packetRecord, node_from, node_to);
 
   doc["type"] = "PACKET_HOP";
   prepareAndSendMessage(doc, String(next_action));
 }
 
-// Hyperparameter and episode management
+// Hyperparameters
 void extractHyperparameters(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
   if (doc["hyperparameters"].containsKey("eta")) {
     g_eta = doc["hyperparameters"]["eta"];
@@ -200,18 +200,21 @@ void extractHyperparameters(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
   }
 }
 
-JsonObject findCurrentEpisode(JsonArray &episodes, int current_episode) {
-  for (JsonObject episode : episodes) {
-    if (episode["episode_number"] == current_episode) {
-      return episode;
+JsonObject findPacketById(JsonArray &packets, int current_packet_id) {
+  for (JsonObject packetRecord : packets) {
+    if (packetRecord["packet_id"] == current_packet_id) {
+      return packetRecord;
     }
   }
   return JsonObject();
 }
 
-void createNewHop(JsonObject &episode, const String &node_from,
+void createNewHop(JsonObject &packetRecord, const String &node_from,
                   const String &next_action) {
-  JsonArray steps = episode["steps"];
+  if (!packetRecord.containsKey("steps")) {
+    packetRecord.createNestedArray("steps");
+  }
+  JsonArray steps = packetRecord["steps"];
   int hop = steps.size();
   JsonObject newHop = steps.createNestedObject();
   newHop["hop"] = hop;
