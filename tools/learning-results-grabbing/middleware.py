@@ -1,6 +1,8 @@
 """
-Middleware: reads Serial from receiver ESP, extracts DELIVERY_DATA JSON,
-forwards to visualization server. For forward-only Q-routing (Boyan & Littman 1993).
+Middleware: reads Serial from the receiver (destination) ESP only — not the sender.
+When a packet is delivered, the receiver prints DELIVERY_DATA: + JSON; this script
+extracts that JSON and POSTs it to the visualization server. For forward-only
+Q-routing (Boyan & Littman 1993).
 """
 import argparse
 import json

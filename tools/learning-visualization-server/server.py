@@ -94,16 +94,15 @@ def index():
             )
             hops_html = pio.to_html(fig, full_html=False)
 
-    # Table: packet #, hop_count, path, accumulated_reward
+    # Table: packet #, hop_count, path
     table_html = "<p>No data available</p>"
     if data:
         table_html = (
             '<table border="1"><tr><th>Node ID</th><th>Packet #</th>'
-            '<th>Hop Count</th><th>Path</th><th>Accumulated Reward</th></tr>'
+            '<th>Hop Count</th><th>Path</th></tr>'
         )
         for entry in data:
             node_id = entry.get('current_node_id', 'N/A')
-            accumulated_reward = entry.get('accumulated_reward', 'N/A')
             packets = entry.get('episodes', [])  # legacy field: delivered packets
             for ep in packets:
                 pkt_num = ep.get('episode_number', 'N/A')  # legacy field
@@ -111,7 +110,7 @@ def index():
                 path = path_to_str(ep)
                 table_html += (
                     f'<tr><td>{node_id}</td><td>{pkt_num}</td>'
-                    f'<td>{hc}</td><td>{path}</td><td>{accumulated_reward}</td></tr>'
+                    f'<td>{hc}</td><td>{path}</td></tr>'
                 )
         table_html += '</table>'
 

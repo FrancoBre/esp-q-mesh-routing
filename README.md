@@ -4,13 +4,21 @@ This project implements a mesh network routing system using **Q-Routing** as des
 
 Each ESP device handles packet reception and transmission in the mesh network. The routing logic minimizes **estimated delivery time**. Q-values represent the estimated time to deliver a packet to the destination via each neighbor—**lower Q means a better path**.
 
+## Project layout
+
+| Path | Contents |
+|------|----------|
+| `firmware/` | ESP8266 sketches—one folder per node (folder name = main `.ino` basename for Arduino CLI) |
+| `tools/` | Host-side Python: serial middleware and visualization server |
+| `docs/` | Additional documentation |
+
 ## Node Roles
 
 | Role | File | Behavior |
 |------|------|----------|
-| **Sender** | `sender-node.ino` | Sends packets on a timer, chooses first hop, forwards packets |
-| **Intermediate** | `intermediate-node.ino` | Forwards packets, updates Q-table at each hop |
-| **Receiver** | `receiver-node.ino` | Packet destination; receives and logs delivery |
+| **Sender** | `firmware/sender-node/sender-node.ino` | Sends packets on a timer, chooses first hop, forwards packets |
+| **Intermediate** | `firmware/intermediate-node/intermediate-node.ino` | Forwards packets, updates Q-table at each hop |
+| **Receiver** | `firmware/receiver-node/receiver-node.ino` | Packet destination; receives and logs delivery |
 
 ```mermaid
 sequenceDiagram
@@ -89,7 +97,6 @@ Only **PACKET_HOP** messages are used. Structure:
         "eta": 0.7
     },
     "current_episode": 1,
-    "accumulated_reward": 0,
     "episodes": [
         {
             "episode_number": 1,
@@ -118,9 +125,9 @@ Only **PACKET_HOP** messages are used. Structure:
 ### Hardware
 
 - 2+ ESP8266 devices
-  - `sender-node.ino` → sender
-  - `intermediate-node.ino` → intermediate
-  - `receiver-node.ino` → receiver
+  - `firmware/sender-node/` → sender
+  - `firmware/intermediate-node/` → intermediate
+  - `firmware/receiver-node/` → receiver
 - Micro-USB data cable
 - Linux machine with `arduino-cli`
 
@@ -177,9 +184,9 @@ $ /dev/ttyUSB0 serial Serial Port (USB)
 For NodeMCU ESP8266, use:
 
 ```bash
-$ arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 ./sender-node
-$ arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 ./intermediate-node
-$ arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 ./receiver-node
+$ arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 ./firmware/sender-node
+$ arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 ./firmware/intermediate-node
+$ arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 ./firmware/receiver-node
 ```
 
 ## Upload
@@ -187,9 +194,9 @@ $ arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 ./receiver-node
 Upload each sketch to the corresponding board:
 
 ```bash
-$ arduino-cli upload -p /dev/ttyUSB0 --fqbn esp8266:esp8266:nodemcuv2 ./sender-node
-$ arduino-cli upload -p /dev/ttyUSB0 --fqbn esp8266:esp8266:nodemcuv2 ./intermediate-node
-$ arduino-cli upload -p /dev/ttyUSB0 --fqbn esp8266:esp8266:nodemcuv2 ./receiver-node
+$ arduino-cli upload -p /dev/ttyUSB0 --fqbn esp8266:esp8266:nodemcuv2 ./firmware/sender-node
+$ arduino-cli upload -p /dev/ttyUSB0 --fqbn esp8266:esp8266:nodemcuv2 ./firmware/intermediate-node
+$ arduino-cli upload -p /dev/ttyUSB0 --fqbn esp8266:esp8266:nodemcuv2 ./firmware/receiver-node
 ```
 
 ## Serial monitoring
@@ -215,10 +222,10 @@ Connect the **receiver** via USB to a PC to visualize learning progress:
 
 ```bash
 # Terminal 1: Start visualization server
-cd learning-visualization-server && pip install -r requirements.txt && python server.py
+cd tools/learning-visualization-server && pip install -r requirements.txt && python server.py
 
 # Terminal 2: Start middleware (receiver connected via USB)
-cd learning-results-grabbing && pip install -r requirements.txt && python middleware.py --verbose
+cd tools/learning-results-grabbing && pip install -r requirements.txt && python middleware.py --verbose
 ```
 
 Open http://localhost:5000 for topology, hop count per delivered packet, and delivery data.

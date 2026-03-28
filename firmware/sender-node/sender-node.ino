@@ -76,7 +76,6 @@ StaticJsonDocument<4096> g_persistentDoc;
 JsonArray g_episodes = g_persistentDoc.createNestedArray("episodes");
 JsonObject g_qTable = g_persistentDoc.createNestedObject("q_table");
 String g_episodesString;
-float g_accumulatedReward = 0.0;
 unsigned long g_lastSentMessage = 0;
 String g_nodeId = "MESH NOT INITIALIZED YET";
 
@@ -171,6 +170,7 @@ void startNewEpisode() {
   } else {
     LOG("Message sent successfully");
     g_nodeState = PROCESSING_EPISODE;
+    g_currentEpisode++;
   }
 }
 
@@ -209,7 +209,6 @@ void handlePacketHop(StaticJsonDocument<1024> &doc) {
   extractHyperparameters(doc);
 
   int current_episode = doc["current_episode"];
-  g_accumulatedReward = doc["accumulated_reward"];
 
   JsonArray receivedEpisodes = doc["episodes"];
   JsonObject episode = findCurrentEpisode(receivedEpisodes, current_episode);
@@ -344,6 +343,7 @@ void createNewHop(JsonObject &episode, const String &node_from,
 
 bool prepareAndSendMessage(StaticJsonDocument<1024> &doc,
                            const String &next_action) {
+  doc["current_node_id"] = String(g_nodeId);
   doc["send_timestamp"] = mesh.getNodeTime();  // For next hop to compute step_time
   copyQTableToPersistent(doc["q_table"]);
   String updatedJsonString;

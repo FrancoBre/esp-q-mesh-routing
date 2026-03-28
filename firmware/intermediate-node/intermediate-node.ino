@@ -59,7 +59,6 @@ enum NodeState { PROCESSING_EPISODE, EXPLOITATION_PHASE };
 
 // Global variables
 NodeState g_nodeState = PROCESSING_EPISODE;
-float g_accumulatedReward = 0.0;
 String g_nodeId = "MESH NOT INITIALIZED YET";
 
 // Objects declarations
@@ -139,7 +138,6 @@ void handlePacketHop(StaticJsonDocument<1024> &doc) {
   extractHyperparameters(doc);
 
   int current_episode = doc["current_episode"];
-  g_accumulatedReward = doc["accumulated_reward"];
 
   JsonArray receivedEpisodes = doc["episodes"];
   JsonObject episode = findCurrentEpisode(receivedEpisodes, current_episode);
@@ -214,6 +212,7 @@ void createNewHop(JsonObject &episode, const String &node_from,
 
 bool prepareAndSendMessage(StaticJsonDocument<1024> &doc,
                            const String &next_action) {
+  doc["current_node_id"] = String(g_nodeId);
   doc["send_timestamp"] = mesh.getNodeTime();  // For next hop to compute step_time
   String updatedJsonString;
   serializeJson(doc, updatedJsonString);
