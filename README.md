@@ -11,7 +11,6 @@ Each ESP device handles packet reception and transmission in the mesh network. T
 | `firmware/` | ESP8266 sketches—one folder per node (folder name = main `.ino` basename for Arduino CLI) |
 | `data/` | LittleFS image source (sender): `injection-schedule.json` — upload with PlatformIO `uploadfs` |
 | `tools/` | Host-side Python: serial middleware (`learning-results-grabbing`) and real-time visualization server (`learning-visualization-server`) |
-| `docs/` | Additional documentation |
 
 ## Node Roles
 
@@ -50,6 +49,9 @@ sequenceDiagram
 ```
 
 **Forward-only flow:** No backward propagation. Q-updates happen at each hop when forwarding. Receiver does not broadcast. The sender’s **injection schedule** (LittleFS JSON) selects **PHYSICAL_BUTTON_DRIVEN** (FLASH on GPIO0), **PERIODIC** (one packet every `tick_ms`), or **LOAD_LEVEL** (expected `load_level` packets per `tick_ms`, stochastic rounding). If the file is missing or invalid, defaults match **PHYSICAL_BUTTON_DRIVEN**.
+
+![ezgif-7613d4d72bf73f91](https://github.com/user-attachments/assets/c13bcea1-a886-418f-82be-ad104d3cbdd7)
+
 
 **Visualization (optional):** When the receiver is connected via USB to a PC, it outputs `DELIVERY_DATA:` + JSON on Serial. The middleware reads this, extracts the JSON, and forwards it to the visualization server. Open http://localhost:5000 for the real-time Q-Routing Debugger — topology, learning curves, Q-table heatmap, convergence tracking, packet details, and event log, all updating live via SSE.
 
@@ -160,7 +162,6 @@ Install required libraries:
 ```bash
 $ arduino-cli lib update-index
 $ arduino-cli lib install "Painless Mesh"
-$ arduino-cli lib install TaskScheduler
 $ arduino-cli lib install ESPAsyncTCP
 $ arduino-cli lib install ArduinoJson
 ```
