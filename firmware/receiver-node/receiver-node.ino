@@ -53,7 +53,9 @@ const float STEP_TIME = 1.0f;
 const float INITIAL_Q = 0.0f;
 float g_eta = 0.7f;
 
-enum MessageType { PACKET_HOP, UNKNOWN };
+enum MessageType { PACKET_HOP, Q_FEEDBACK, UNKNOWN };
+
+const int MAX_RETRIES = 10;
 
 String g_nodeId = "MESH NOT INITIALIZED YET";
 
@@ -79,6 +81,9 @@ void ensureStateExists(JsonObject &q_table, const String &state_from,
                        const String &state_to);
 void initializeOrUpdateQTable(JsonObject &q_table);
 void emitDeliveryData(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
+void sendQFeedback(const String &to_node, const String &via_node,
+                   float estimate_t, float step_time);
+bool sendMessageWithRetries(uint32_t next_hop, String &msg);
 
 void setup() {
   Serial.begin(9600);
@@ -144,6 +149,8 @@ void handlePacketHop(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
   }
 
   updateQTableForwardOnly(node_from, node_to, time_in_queue, step_time, t, doc);
+
+  sendQFeedback(node_from, node_to, t, step_time);
 
   createNewHop(packetRecord, node_from, node_to);
 
@@ -243,5 +250,40 @@ void initializeOrUpdateQTable(JsonObject &q_table) {
 }
 
 MessageType getMessageType(const String &typeStr) {
-  return (typeStr == "PACKET_HOP") ? PACKET_HOP : UNKNOWN;
+  if (typeStr == "PACKET_HOP") return PACKET_HOP;
+  if (typeStr == "Q_FEEDBACK") return Q_FEEDBACK;
+  return UNKNOWN;
+}
+
+void sendQFeedback(const String &to_node, const String &via_node,
+                   float estimate_t, float step_time) {
+  StaticJsonDocument<256> feedbackDoc;
+  feedbackDoc["type"] = "Q_FEEDBACK";
+  feedbackDoc["from_node"] = to_node;
+  feedbackDoc["via_node"] = via_node;
+  feedbackDoc["estimate_t"] = estimate_t;
+  feedbackDoc["step_time"] = step_time;
+
+  String feedbackStr;
+  serializeJson(feedbackDoc, feedbackStr);
+
+  uint32_t dest = to_node.toInt();
+  if (sendMessageWithRetries(dest, feedbackStr)) {
+    LOG("Q_FEEDBACK sent to " + to_node + " (via=" + via_node +
+        " t=" + String(estimate_t) + " s=" + String(step_time) + ")");
+  } else {
+    LOG("Failed to send Q_FEEDBACK to " + to_node);
+  }
+}
+
+bool sendMessageWithRetries(uint32_t next_hop, String &msg) {
+  int retryCount = 0;
+  while (retryCount < MAX_RETRIES) {
+    if (mesh.sendSingle(next_hop, msg)) {
+      return true;
+    }
+    retryCount++;
+    delay(100);
+  }
+  return false;
 }

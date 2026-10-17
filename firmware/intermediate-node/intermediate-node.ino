@@ -58,12 +58,14 @@ const float STEP_TIME = 1.0f;      // Fallback when send_timestamp missing
 const float INITIAL_Q = 0.0f;
 float g_eta = 0.7f;               // Learning rate
 
-enum MessageType { PACKET_HOP, UNKNOWN };
+enum MessageType { PACKET_HOP, Q_FEEDBACK, UNKNOWN };
 
 enum NodeState { PROCESSING_PACKET, EXPLOITATION_PHASE };
 
 // Global variables
 NodeState g_nodeState = PROCESSING_PACKET;
+StaticJsonDocument<8192> g_persistentDoc;
+JsonObject g_qTable = g_persistentDoc.createNestedObject("q_table");
 String g_nodeId = "MESH NOT INITIALIZED YET";
 
 // Objects declarations
@@ -98,6 +100,10 @@ void updateQTableForwardOnly(int next_action,
                              float t,
                              StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
 void initializeOrUpdateQTable(JsonObject &q_table);
+void handleQFeedback(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
+void sendQFeedback(const String &to_node, const String &via_node,
+                   float estimate_t, float step_time);
+void copyQTableToPersistent(JsonObject src);
 
 // Main logic functions
 void setup() {
@@ -133,8 +139,11 @@ void receivedCallback(uint32_t from, String &msg) {
     return;
   }
 
-  if (getMessageType(doc["type"]) == PACKET_HOP) {
+  MessageType msgType = getMessageType(doc["type"]);
+  if (msgType == PACKET_HOP) {
     handlePacketHop(doc);
+  } else if (msgType == Q_FEEDBACK) {
+    handleQFeedback(doc);
   }
 }
 
@@ -184,6 +193,8 @@ void processPacket(JsonObject &packetRecord, StaticJsonDocument<PACKET_JSON_CAPA
 
   updateQTableForwardOnly(next_action, node_from, node_to, time_in_queue,
                           step_time, t, doc);
+
+  sendQFeedback(node_from, node_to, t, step_time);
 
   createNewHop(packetRecord, node_from, node_to);
 
@@ -253,6 +264,7 @@ void updateQTableForwardOnly(int next_action,
   float new_q = old_q + delta;
 
   q_table[node_from][node_to] = new_q;
+  copyQTableToPersistent(q_table);
 
   LOG("Q-update [from=" + node_from + " to=" + node_to + "] old=" +
       String(old_q) + " target=" + String(target) + " new=" + String(new_q));
@@ -307,7 +319,9 @@ void initializeOrUpdateQTable(JsonObject &q_table) {
 }
 
 MessageType getMessageType(const String &typeStr) {
-  return (typeStr == "PACKET_HOP") ? PACKET_HOP : UNKNOWN;
+  if (typeStr == "PACKET_HOP") return PACKET_HOP;
+  if (typeStr == "Q_FEEDBACK") return Q_FEEDBACK;
+  return UNKNOWN;
 }
 
 void ensureStateExists(JsonObject &q_table, const String &state_from,
@@ -374,4 +388,63 @@ unsigned long getSyncedTimeInMs() {
   unsigned long scaledTimeMilliseconds = nodeTimeMilliseconds / 100;
 
   return scaledTimeMilliseconds;
+}
+
+void handleQFeedback(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
+  String from_node = doc["from_node"].as<String>();
+  String via_node = doc["via_node"].as<String>();
+  float estimate_t = doc["estimate_t"].as<float>();
+  float step_time = doc["step_time"].as<float>();
+  float time_in_queue = 0.0f;
+
+  if (!g_qTable.containsKey(from_node)) {
+    g_qTable.createNestedObject(from_node);
+  }
+  if (!g_qTable[from_node].containsKey(via_node)) {
+    g_qTable[from_node][via_node] = INITIAL_Q;
+  }
+
+  float old_q = g_qTable[from_node][via_node].as<float>();
+  float target = time_in_queue + step_time + estimate_t;
+  float new_q = old_q + g_eta * (target - old_q);
+  g_qTable[from_node][via_node] = new_q;
+
+  LOG("Q_FEEDBACK applied [from=" + from_node + " via=" + via_node +
+      "] old=" + String(old_q) + " t=" + String(estimate_t) +
+      " step_time=" + String(step_time) + " new=" + String(new_q));
+}
+
+void sendQFeedback(const String &to_node, const String &via_node,
+                   float estimate_t, float step_time) {
+  StaticJsonDocument<256> feedbackDoc;
+  feedbackDoc["type"] = "Q_FEEDBACK";
+  feedbackDoc["from_node"] = to_node;
+  feedbackDoc["via_node"] = via_node;
+  feedbackDoc["estimate_t"] = estimate_t;
+  feedbackDoc["step_time"] = step_time;
+
+  String feedbackStr;
+  serializeJson(feedbackDoc, feedbackStr);
+
+  uint32_t dest = to_node.toInt();
+  if (sendMessageWithRetries(dest, feedbackStr)) {
+    LOG("Q_FEEDBACK sent to " + to_node + " (via=" + via_node +
+        " t=" + String(estimate_t) + " s=" + String(step_time) + ")");
+  } else {
+    LOG("Failed to send Q_FEEDBACK to " + to_node);
+  }
+}
+
+void copyQTableToPersistent(JsonObject src) {
+  for (JsonPair kv_from : src) {
+    JsonObject inner;
+    if (g_qTable.containsKey(kv_from.key().c_str())) {
+      inner = g_qTable[kv_from.key().c_str()];
+    } else {
+      inner = g_qTable.createNestedObject(kv_from.key().c_str());
+    }
+    for (JsonPair kv_to : kv_from.value().as<JsonObject>()) {
+      inner[kv_to.key().c_str()] = kv_to.value().as<float>();
+    }
+  }
 }
