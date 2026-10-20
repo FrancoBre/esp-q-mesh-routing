@@ -71,12 +71,12 @@ void extractHyperparameters(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
 JsonObject findPacketById(JsonArray &packets, int current_packet_id);
 void createNewHop(JsonObject &packetRecord, const String &node_from,
                   const String &node_to);
-void updateQTableForwardOnly(const String &node_from,
-                             const String &node_to,
-                             float time_in_queue,
-                             float step_time,
-                             float t,
-                             StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
+void updatePacketQTable(const String &node_from,
+                        const String &node_to,
+                        float time_in_queue,
+                        float step_time,
+                        float t,
+                        StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
 void ensureStateExists(JsonObject &q_table, const String &state_from,
                        const String &state_to);
 void initializeOrUpdateQTable(JsonObject &q_table);
@@ -148,7 +148,9 @@ void handlePacketHop(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
                 1000000.0f;
   }
 
-  updateQTableForwardOnly(node_from, node_to, time_in_queue, step_time, t, doc);
+  // Destination remaining time is exactly zero. Keep the corresponding
+  // observed update in packet telemetry, then report it to the previous node.
+  updatePacketQTable(node_from, node_to, time_in_queue, step_time, t, doc);
 
   sendQFeedback(node_from, node_to, t, step_time);
 
@@ -197,12 +199,12 @@ void createNewHop(JsonObject &packetRecord, const String &node_from,
   newHop["node_to"] = node_to;
 }
 
-void updateQTableForwardOnly(const String &node_from,
-                             const String &node_to,
-                             float time_in_queue,
-                             float step_time,
-                             float t,
-                             StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
+void updatePacketQTable(const String &node_from,
+                        const String &node_to,
+                        float time_in_queue,
+                        float step_time,
+                        float t,
+                        StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
   JsonObject q_table = doc["q_table"];
 
   initializeOrUpdateQTable(q_table);
@@ -215,7 +217,7 @@ void updateQTableForwardOnly(const String &node_from,
 
   q_table[node_from][node_to] = new_q;
 
-  LOG("Q-update [from=" + node_from + " to=" + node_to + "] old=" +
+  LOG("Packet telemetry Q-update [from=" + node_from + " to=" + node_to + "] old=" +
       String(old_q) + " target=" + String(target) + " new=" + String(new_q));
 }
 

@@ -109,8 +109,7 @@ void handlePacketHop(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
 String getMessageTypeString(MessageType type);
 MessageType getMessageType(const String &typeStr);
 std::vector<int> getNeighbors();
-int chooseBestAction(const JsonObject &actions,
-                     const std::vector<int> &neighbors);
+int chooseBestAction(const std::vector<int> &neighbors);
 bool sendMessageWithRetries(uint32_t next_hop, String &msg);
 void extractHyperparameters(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
 void createNewHop(JsonObject &packetRecord, const String &node_from,
@@ -119,16 +118,15 @@ bool prepareAndSendMessage(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc,
                            const String &next_action);
 JsonObject findPacketById(JsonArray &packets, int current_packet_id);
 void processPacket(JsonObject &packetRecord, StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
-void updateQTableForwardOnly(int next_action,
-                             const String &node_from,
-                             const String &node_to,
-                             float time_in_queue,
-                             float step_time,
-                             float t,
-                             StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
-float estimateRemainingTime(const String &current_node,
-                            StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
-void copyQTableToPersistent(JsonObject src);
+void updatePacketQTable(const String &node_from,
+                        const String &node_to,
+                        float time_in_queue,
+                        float step_time,
+                        float t,
+                        StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
+float estimateRemainingTime(const std::vector<int> &neighbors);
+void initializeLocalActions(const std::vector<int> &neighbors);
+void copyLocalActionsToPacket(JsonObject q_table);
 void handleQFeedback(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
 void sendQFeedback(const String &to_node, const String &via_node,
                    float estimate_t, float step_time);
@@ -263,7 +261,7 @@ void sendNewPacket() {
     LOG("No neighbors found");
     return;
   }
-  int next_action = chooseBestAction(doc["q_table"][g_nodeId], neighbors);
+  int next_action = chooseBestAction(neighbors);
   if (next_action == -1) {
     LOG("No valid next action");
     return;
@@ -327,14 +325,17 @@ void processPacket(JsonObject &packetRecord, StaticJsonDocument<PACKET_JSON_CAPA
 
   std::vector<int> neighbors = getNeighbors();
   if (neighbors.empty()) return;
-  int next_action = chooseBestAction(doc["q_table"][g_nodeId], neighbors);
+  initializeLocalActions(neighbors);
+  copyLocalActionsToPacket(doc["q_table"]);
+
+  int next_action = chooseBestAction(neighbors);
   if (next_action == -1) {
     return;
   }
 
   // ΔQ_x(d,y) = η((q + s + t) - Q_x(d,y))
   // We update Q(node_from, us) = link that was traversed. t = our estimate (we're receiver y)
-  float t = estimateRemainingTime(g_nodeId, doc);
+  float t = estimateRemainingTime(neighbors);
   // Queues are handled by the TCP stack; we don't have access to that data
   float time_in_queue = 0.0f;
 
@@ -344,8 +345,9 @@ void processPacket(JsonObject &packetRecord, StaticJsonDocument<PACKET_JSON_CAPA
                 1000000.0f;  // seconds
   }
 
-  updateQTableForwardOnly(next_action, node_from, node_to, time_in_queue,
-                          step_time, t, doc);
+  // This records the observed update for telemetry. Persistent local learning
+  // is applied only by handleQFeedback() in the previous node.
+  updatePacketQTable(node_from, node_to, time_in_queue, step_time, t, doc);
 
   sendQFeedback(node_from, node_to, t, step_time);
 
@@ -399,6 +401,7 @@ void buildMessage(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc, String next_act
   }
 
   JsonObject q_table = doc.createNestedObject("q_table");
+  initializeLocalActions(getNeighbors());
   for (JsonPair kv_from : g_qTable) {
     JsonObject inner = q_table.createNestedObject(kv_from.key().c_str());
     for (JsonPair kv_to : kv_from.value().as<JsonObject>()) {
@@ -451,7 +454,6 @@ bool prepareAndSendMessage(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc,
                            const String &next_action) {
   doc["current_node_id"] = String(g_nodeId);
   doc["send_timestamp"] = mesh.getNodeTime();  // For next hop to compute step_time
-  copyQTableToPersistent(doc["q_table"]);
   String updatedJsonString;
   serializeJson(doc, updatedJsonString);
   doc["type"] = "PACKET_HOP";
@@ -460,15 +462,14 @@ bool prepareAndSendMessage(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc,
   return sendMessageWithRetries(next_action_int, updatedJsonString);
 }
 
-// Q-Routing update: ΔQ_x(d,y) = η((q + s + t) - Q_x(d,y))
-// We update Q(node_from, node_to) = link traversed. t = receiver's estimate.
-void updateQTableForwardOnly(int next_action,
-                             const String &node_from,
-                             const String &node_to,
-                             float time_in_queue,
-                             float step_time,
-                             float t,
-                             StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
+// Telemetry mirror of the Q-Routing update that Q_FEEDBACK applies at
+// node_from. This does not mutate this node's persistent local table.
+void updatePacketQTable(const String &node_from,
+                        const String &node_to,
+                        float time_in_queue,
+                        float step_time,
+                        float t,
+                        StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
   JsonObject q_table = doc["q_table"];
 
   initializeOrUpdateQTable(q_table);
@@ -480,31 +481,23 @@ void updateQTableForwardOnly(int next_action,
   float new_q = old_q + delta;
 
   q_table[node_from][node_to] = new_q;
-  copyQTableToPersistent(q_table);
 
-  LOG("Q-update [from=" + node_from + " to=" + node_to + "] old=" +
+  LOG("Packet telemetry Q-update [from=" + node_from + " to=" + node_to + "] old=" +
       String(old_q) + " target=" + String(target) + " new=" + String(new_q));
 }
 
-float estimateRemainingTime(const String &current_node,
-                            StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
-  JsonObject q_table = doc["q_table"];
-
-  if (!q_table.containsKey(current_node)) {
-    return 99999.0;  // Large number when no information available
-  }
-
+float estimateRemainingTime(const std::vector<int> &neighbors) {
+  initializeLocalActions(neighbors);
   float min_time = 99999.0;  // Start high to find minimum
-
-  JsonObject actions = q_table[current_node];
-  for (JsonPair kv : actions) {
-    float q_value = kv.value().as<float>();
+  JsonObject actions = g_qTable[g_nodeId];
+  for (const auto &neighbor : neighbors) {
+    float q_value = actions[String(neighbor)].as<float>();
     if (q_value < min_time) {
       min_time = q_value;
     }
   }
 
-  LOG("Estimated remaining time from node " + current_node + ": " +
+  LOG("Estimated remaining time from local Q-table at node " + g_nodeId + ": " +
       String(min_time));
   return min_time;
 }
@@ -545,17 +538,27 @@ void initializeOrUpdateQTable(JsonObject &q_table) {
   }
 }
 
-void copyQTableToPersistent(JsonObject src) {
-  for (JsonPair kv_from : src) {
-    JsonObject inner;
-    if (g_qTable.containsKey(kv_from.key().c_str())) {
-      inner = g_qTable[kv_from.key().c_str()];
-    } else {
-      inner = g_qTable.createNestedObject(kv_from.key().c_str());
+void initializeLocalActions(const std::vector<int> &neighbors) {
+  if (!g_qTable.containsKey(g_nodeId)) {
+    g_qTable.createNestedObject(g_nodeId);
+  }
+  for (const auto &neighbor : neighbors) {
+    String neighborId = String(neighbor);
+    if (!g_qTable[g_nodeId].containsKey(neighborId)) {
+      g_qTable[g_nodeId][neighborId] = INITIAL_Q;
     }
-    for (JsonPair kv_to : kv_from.value().as<JsonObject>()) {
-      inner[kv_to.key().c_str()] = kv_to.value().as<float>();
-    }
+  }
+}
+
+// q_table in PACKET_HOP remains wire-compatible telemetry: each visited node
+// contributes its local row. It is never used to overwrite local learning.
+void copyLocalActionsToPacket(JsonObject q_table) {
+  if (!q_table.containsKey(g_nodeId)) {
+    q_table.createNestedObject(g_nodeId);
+  }
+  JsonObject packetActions = q_table[g_nodeId];
+  for (JsonPair action : g_qTable[g_nodeId].as<JsonObject>()) {
+    packetActions[action.key().c_str()] = action.value().as<float>();
   }
 }
 
@@ -565,6 +568,11 @@ void handleQFeedback(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
   float estimate_t = doc["estimate_t"].as<float>();
   float step_time = doc["step_time"].as<float>();
   float time_in_queue = 0.0f;
+
+  if (from_node != g_nodeId) {
+    LOG("Ignoring Q_FEEDBACK addressed to " + from_node);
+    return;
+  }
 
   if (!g_qTable.containsKey(from_node)) {
     g_qTable.createNestedObject(from_node);
@@ -629,8 +637,9 @@ std::vector<int> getNeighbors() {
 
 // Choose neighbor with minimum Q-value (greedy)
 // Q-Routing: lower Q = better path (faster delivery), so choose minimum
-int chooseBestAction(const JsonObject &actions,
-                     const std::vector<int> &neighbors) {
+int chooseBestAction(const std::vector<int> &neighbors) {
+  initializeLocalActions(neighbors);
+  JsonObject actions = g_qTable[g_nodeId];
   float best_value = 999999.0f;  // Start high, we want minimum
   int best_action = -1;
 
