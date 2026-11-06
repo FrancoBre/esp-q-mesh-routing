@@ -31,6 +31,7 @@
 #include <ArduinoJson.h>
 
 #include "painlessMesh.h"
+#include <q_mesh_utils.h>
 
 #define LOG(msg)                         \
   Serial.print("[RECEIVER NODE - Id: "); \
@@ -57,7 +58,7 @@ enum MessageType { PACKET_HOP, Q_FEEDBACK, UNKNOWN };
 
 const int MAX_RETRIES = 10;
 
-String g_nodeId = "MESH NOT INITIALIZED YET";
+NodeId g_nodeId = 0;
 
 Scheduler userScheduler;
 painlessMesh mesh;
@@ -81,9 +82,9 @@ void ensureStateExists(JsonObject &q_table, const String &state_from,
                        const String &state_to);
 void initializeOrUpdateQTable(JsonObject &q_table);
 void emitDeliveryData(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
-void sendQFeedback(const String &to_node, const String &via_node,
+void sendQFeedback(NodeId to_node, NodeId via_node,
                    float estimate_t, float step_time);
-bool sendMessageWithRetries(uint32_t next_hop, String &msg);
+bool sendMessageWithRetries(NodeId next_hop, String &msg);
 
 void setup() {
   Serial.begin(9600);
@@ -97,7 +98,7 @@ void setup() {
 
   mesh.init(MESH_PREFIX, MESH_PASSWORD, &userScheduler, MESH_PORT);
   mesh.onReceive(&receivedCallback);
-  g_nodeId = String(mesh.getNodeId());
+  g_nodeId = mesh.getNodeId();
 
   LOG("Mesh initialized successfully");
 }
@@ -137,7 +138,7 @@ void handlePacketHop(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
   }
 
   String node_from = doc["current_node_id"].as<String>();
-  String node_to = String(g_nodeId);
+  String node_to = nodeIdKey(g_nodeId);
 
   float t = 0.0f;
   float time_in_queue = 0.0f;
@@ -152,11 +153,14 @@ void handlePacketHop(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
   // observed update in packet telemetry, then report it to the previous node.
   updatePacketQTable(node_from, node_to, time_in_queue, step_time, t, doc);
 
-  sendQFeedback(node_from, node_to, t, step_time);
+  NodeId previousNode = 0;
+  if (parseNodeId(doc["current_node_id"], previousNode)) {
+    sendQFeedback(previousNode, g_nodeId, t, step_time);
+  }
 
   createNewHop(packetRecord, node_from, node_to);
 
-  doc["current_node_id"] = g_nodeId;
+  doc["current_node_id"] = nodeIdKey(g_nodeId);
   doc["type"] = "PACKET_DELIVERED";
   emitDeliveryData(doc);
 }
@@ -257,28 +261,28 @@ MessageType getMessageType(const String &typeStr) {
   return UNKNOWN;
 }
 
-void sendQFeedback(const String &to_node, const String &via_node,
+void sendQFeedback(NodeId to_node, NodeId via_node,
                    float estimate_t, float step_time) {
   StaticJsonDocument<256> feedbackDoc;
   feedbackDoc["type"] = "Q_FEEDBACK";
-  feedbackDoc["from_node"] = to_node;
-  feedbackDoc["via_node"] = via_node;
+  feedbackDoc["from_node"] = nodeIdKey(to_node);
+  feedbackDoc["via_node"] = nodeIdKey(via_node);
   feedbackDoc["estimate_t"] = estimate_t;
   feedbackDoc["step_time"] = step_time;
 
   String feedbackStr;
   serializeJson(feedbackDoc, feedbackStr);
 
-  uint32_t dest = to_node.toInt();
-  if (sendMessageWithRetries(dest, feedbackStr)) {
-    LOG("Q_FEEDBACK sent to " + to_node + " (via=" + via_node +
+  if (sendMessageWithRetries(to_node, feedbackStr)) {
+    LOG("Q_FEEDBACK queued to " + nodeIdKey(to_node) + " (via=" +
+        nodeIdKey(via_node) +
         " t=" + String(estimate_t) + " s=" + String(step_time) + ")");
   } else {
-    LOG("Failed to send Q_FEEDBACK to " + to_node);
+    LOG("Failed to queue Q_FEEDBACK to " + nodeIdKey(to_node));
   }
 }
 
-bool sendMessageWithRetries(uint32_t next_hop, String &msg) {
+bool sendMessageWithRetries(NodeId next_hop, String &msg) {
   int retryCount = 0;
   while (retryCount < MAX_RETRIES) {
     if (mesh.sendSingle(next_hop, msg)) {

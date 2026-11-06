@@ -33,6 +33,7 @@
 
 #include "injection_config.h"
 #include "painlessMesh.h"
+#include <q_mesh_utils.h>
 
 // Logging macro
 #define LOG(msg)                       \
@@ -89,7 +90,7 @@ StaticJsonDocument<8192> g_persistentDoc;
 JsonArray g_packets = g_persistentDoc.createNestedArray("packets");
 JsonObject g_qTable = g_persistentDoc.createNestedObject("q_table");
 String g_packetsString;
-String g_nodeId = "MESH NOT INITIALIZED YET";
+NodeId g_nodeId = 0;
 
 // Object declarations
 Scheduler userScheduler;
@@ -104,18 +105,18 @@ void pollScheduledInjection();
 void logInjectionConfig();
 void applyInjectionRngSeed();
 void sendNewPacket();
-void buildMessage(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc, String next_action);
+void buildMessage(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc, NodeId next_action);
 void handlePacketHop(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
 String getMessageTypeString(MessageType type);
 MessageType getMessageType(const String &typeStr);
-std::vector<int> getNeighbors();
-int chooseBestAction(const std::vector<int> &neighbors);
-bool sendMessageWithRetries(uint32_t next_hop, String &msg);
+std::vector<NodeId> getNeighbors();
+NodeId chooseBestAction(const std::vector<NodeId> &neighbors);
+bool sendMessageWithRetries(NodeId next_hop, String &msg);
 void extractHyperparameters(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
 void createNewHop(JsonObject &packetRecord, const String &node_from,
                   const String &next_action);
 bool prepareAndSendMessage(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc,
-                           const String &next_action);
+                           NodeId next_action);
 JsonObject findPacketById(JsonArray &packets, int current_packet_id);
 void processPacket(JsonObject &packetRecord, StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
 void updatePacketQTable(const String &node_from,
@@ -124,11 +125,11 @@ void updatePacketQTable(const String &node_from,
                         float step_time,
                         float t,
                         StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
-float estimateRemainingTime(const std::vector<int> &neighbors);
-void initializeLocalActions(const std::vector<int> &neighbors);
+float estimateRemainingTime(const std::vector<NodeId> &neighbors);
+void initializeLocalActions(const std::vector<NodeId> &neighbors);
 void copyLocalActionsToPacket(JsonObject q_table);
 void handleQFeedback(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
-void sendQFeedback(const String &to_node, const String &via_node,
+void sendQFeedback(NodeId to_node, NodeId via_node,
                    float estimate_t, float step_time);
 
 void setup() {
@@ -156,7 +157,7 @@ void setup() {
   mesh.init(MESH_PREFIX, MESH_PASSWORD, &userScheduler, MESH_PORT);
   mesh.onReceive(&receivedMessage);
 
-  g_nodeId = String(mesh.getNodeId());
+  g_nodeId = mesh.getNodeId();
 
   if (g_injection_config.mode == InjectionMode::PhysicalButtonDriven) {
     LOG("Mesh ready — press FLASH (GPIO " + String(FLASH_BUTTON_PIN) +
@@ -255,14 +256,14 @@ void sendNewPacket() {
   mesh.subConnectionJson(true);
 
   StaticJsonDocument<PACKET_JSON_CAPACITY> doc;
-  buildMessage(doc, "");
-  std::vector<int> neighbors = getNeighbors();
+  buildMessage(doc, 0);
+  std::vector<NodeId> neighbors = getNeighbors();
   if (neighbors.empty()) {
     LOG("No neighbors found");
     return;
   }
-  int next_action = chooseBestAction(neighbors);
-  if (next_action == -1) {
+  NodeId next_action = chooseBestAction(neighbors);
+  if (next_action == 0) {
     LOG("No valid next action");
     return;
   }
@@ -321,15 +322,15 @@ void handlePacketHop(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
 
 void processPacket(JsonObject &packetRecord, StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
   String node_from = doc["current_node_id"];
-  String node_to = String(g_nodeId);
+  String node_to = nodeIdKey(g_nodeId);
 
-  std::vector<int> neighbors = getNeighbors();
+  std::vector<NodeId> neighbors = getNeighbors();
   if (neighbors.empty()) return;
   initializeLocalActions(neighbors);
   copyLocalActionsToPacket(doc["q_table"]);
 
-  int next_action = chooseBestAction(neighbors);
-  if (next_action == -1) {
+  NodeId next_action = chooseBestAction(neighbors);
+  if (next_action == 0) {
     return;
   }
 
@@ -349,18 +350,21 @@ void processPacket(JsonObject &packetRecord, StaticJsonDocument<PACKET_JSON_CAPA
   // is applied only by handleQFeedback() in the previous node.
   updatePacketQTable(node_from, node_to, time_in_queue, step_time, t, doc);
 
-  sendQFeedback(node_from, node_to, t, step_time);
+  NodeId previousNode = 0;
+  if (parseNodeId(doc["current_node_id"], previousNode)) {
+    sendQFeedback(previousNode, g_nodeId, t, step_time);
+  }
 
   createNewHop(packetRecord, node_from, node_to);
 
   doc["type"] = "PACKET_HOP";
-  prepareAndSendMessage(doc, String(next_action));
+  prepareAndSendMessage(doc, next_action);
 }
 
-void buildMessage(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc, String next_action) {
+void buildMessage(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc, NodeId next_action) {
   doc["type"] = getMessageTypeString(PACKET_HOP);
 
-  doc["current_node_id"] = String(g_nodeId);
+  doc["current_node_id"] = nodeIdKey(g_nodeId);
 
   JsonObject hyperparameters = doc.createNestedObject("hyperparameters");
   hyperparameters["eta"] = g_eta;
@@ -451,15 +455,14 @@ void createNewHop(JsonObject &packetRecord, const String &node_from,
 }
 
 bool prepareAndSendMessage(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc,
-                           const String &next_action) {
-  doc["current_node_id"] = String(g_nodeId);
+                           NodeId next_action) {
+  doc["current_node_id"] = nodeIdKey(g_nodeId);
   doc["send_timestamp"] = mesh.getNodeTime();  // For next hop to compute step_time
   String updatedJsonString;
   serializeJson(doc, updatedJsonString);
   doc["type"] = "PACKET_HOP";
 
-  uint32_t next_action_int = next_action.toInt();
-  return sendMessageWithRetries(next_action_int, updatedJsonString);
+  return sendMessageWithRetries(next_action, updatedJsonString);
 }
 
 // Telemetry mirror of the Q-Routing update that Q_FEEDBACK applies at
@@ -486,18 +489,18 @@ void updatePacketQTable(const String &node_from,
       String(old_q) + " target=" + String(target) + " new=" + String(new_q));
 }
 
-float estimateRemainingTime(const std::vector<int> &neighbors) {
+float estimateRemainingTime(const std::vector<NodeId> &neighbors) {
   initializeLocalActions(neighbors);
   float min_time = 99999.0;  // Start high to find minimum
-  JsonObject actions = g_qTable[g_nodeId];
+  JsonObject actions = g_qTable[nodeIdKey(g_nodeId)];
   for (const auto &neighbor : neighbors) {
-    float q_value = actions[String(neighbor)].as<float>();
+    float q_value = actions[nodeIdKey(neighbor)].as<float>();
     if (q_value < min_time) {
       min_time = q_value;
     }
   }
 
-  LOG("Estimated remaining time from local Q-table at node " + g_nodeId + ": " +
+  LOG("Estimated remaining time from local Q-table at node " + nodeIdKey(g_nodeId) + ": " +
       String(min_time));
   return min_time;
 }
@@ -538,14 +541,15 @@ void initializeOrUpdateQTable(JsonObject &q_table) {
   }
 }
 
-void initializeLocalActions(const std::vector<int> &neighbors) {
-  if (!g_qTable.containsKey(g_nodeId)) {
-    g_qTable.createNestedObject(g_nodeId);
+void initializeLocalActions(const std::vector<NodeId> &neighbors) {
+  String localNode = nodeIdKey(g_nodeId);
+  if (!g_qTable.containsKey(localNode)) {
+    g_qTable.createNestedObject(localNode);
   }
   for (const auto &neighbor : neighbors) {
-    String neighborId = String(neighbor);
-    if (!g_qTable[g_nodeId].containsKey(neighborId)) {
-      g_qTable[g_nodeId][neighborId] = INITIAL_Q;
+    String neighborId = nodeIdKey(neighbor);
+    if (!g_qTable[localNode].containsKey(neighborId)) {
+      g_qTable[localNode][neighborId] = INITIAL_Q;
     }
   }
 }
@@ -553,23 +557,31 @@ void initializeLocalActions(const std::vector<int> &neighbors) {
 // q_table in PACKET_HOP remains wire-compatible telemetry: each visited node
 // contributes its local row. It is never used to overwrite local learning.
 void copyLocalActionsToPacket(JsonObject q_table) {
-  if (!q_table.containsKey(g_nodeId)) {
-    q_table.createNestedObject(g_nodeId);
+  String localNode = nodeIdKey(g_nodeId);
+  if (!q_table.containsKey(localNode)) {
+    q_table.createNestedObject(localNode);
   }
-  JsonObject packetActions = q_table[g_nodeId];
-  for (JsonPair action : g_qTable[g_nodeId].as<JsonObject>()) {
+  JsonObject packetActions = q_table[localNode];
+  for (JsonPair action : g_qTable[localNode].as<JsonObject>()) {
     packetActions[action.key().c_str()] = action.value().as<float>();
   }
 }
 
 void handleQFeedback(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
-  String from_node = doc["from_node"].as<String>();
-  String via_node = doc["via_node"].as<String>();
+  NodeId fromNodeId = 0;
+  NodeId viaNodeId = 0;
+  if (!parseNodeId(doc["from_node"], fromNodeId) ||
+      !parseNodeId(doc["via_node"], viaNodeId)) {
+    LOG("Ignoring Q_FEEDBACK with invalid node ID");
+    return;
+  }
+  String from_node = nodeIdKey(fromNodeId);
+  String via_node = nodeIdKey(viaNodeId);
   float estimate_t = doc["estimate_t"].as<float>();
   float step_time = doc["step_time"].as<float>();
   float time_in_queue = 0.0f;
 
-  if (from_node != g_nodeId) {
+  if (fromNodeId != g_nodeId) {
     LOG("Ignoring Q_FEEDBACK addressed to " + from_node);
     return;
   }
@@ -591,24 +603,24 @@ void handleQFeedback(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
       " step_time=" + String(step_time) + " new=" + String(new_q));
 }
 
-void sendQFeedback(const String &to_node, const String &via_node,
+void sendQFeedback(NodeId to_node, NodeId via_node,
                    float estimate_t, float step_time) {
   StaticJsonDocument<256> feedbackDoc;
   feedbackDoc["type"] = "Q_FEEDBACK";
-  feedbackDoc["from_node"] = to_node;
-  feedbackDoc["via_node"] = via_node;
+  feedbackDoc["from_node"] = nodeIdKey(to_node);
+  feedbackDoc["via_node"] = nodeIdKey(via_node);
   feedbackDoc["estimate_t"] = estimate_t;
   feedbackDoc["step_time"] = step_time;
 
   String feedbackStr;
   serializeJson(feedbackDoc, feedbackStr);
 
-  uint32_t dest = to_node.toInt();
-  if (sendMessageWithRetries(dest, feedbackStr)) {
-    LOG("Q_FEEDBACK sent to " + to_node + " (via=" + via_node +
+  if (sendMessageWithRetries(to_node, feedbackStr)) {
+    LOG("Q_FEEDBACK queued to " + nodeIdKey(to_node) + " (via=" +
+        nodeIdKey(via_node) +
         " t=" + String(estimate_t) + " s=" + String(step_time) + ")");
   } else {
-    LOG("Failed to send Q_FEEDBACK to " + to_node);
+    LOG("Failed to queue Q_FEEDBACK to " + nodeIdKey(to_node));
   }
 }
 
@@ -626,32 +638,27 @@ void ensureStateExists(JsonObject &q_table, const String &state_from,
   }
 }
 
-std::vector<int> getNeighbors() {
-  auto nodes = mesh.getNodeList(false);
-  std::vector<int> neighbors;
-  for (const auto &id : nodes) {
-    neighbors.push_back(id);
-  }
-  return neighbors;
+std::vector<NodeId> getNeighbors() {
+  return getDirectMeshNeighbors(mesh);
 }
 
 // Choose neighbor with minimum Q-value (greedy)
 // Q-Routing: lower Q = better path (faster delivery), so choose minimum
-int chooseBestAction(const std::vector<int> &neighbors) {
+NodeId chooseBestAction(const std::vector<NodeId> &neighbors) {
   initializeLocalActions(neighbors);
-  JsonObject actions = g_qTable[g_nodeId];
+  JsonObject actions = g_qTable[nodeIdKey(g_nodeId)];
   float best_value = 999999.0f;  // Start high, we want minimum
-  int best_action = -1;
+  NodeId best_action = 0;
 
   for (const auto &neighbor : neighbors) {
-    float value = actions[String(neighbor)].as<float>();
+    float value = actions[nodeIdKey(neighbor)].as<float>();
     if (value < best_value) {
       best_value = value;
       best_action = neighbor;
     }
   }
 
-  if (best_action == -1) {
+  if (best_action == 0) {
     LOG("No valid actions found.");
     return -1;
   }
@@ -660,7 +667,7 @@ int chooseBestAction(const std::vector<int> &neighbors) {
 }
 
 // Retry logic
-bool sendMessageWithRetries(uint32_t next_hop, String &msg) {
+bool sendMessageWithRetries(NodeId next_hop, String &msg) {
   int retryCount = 0;
 
   while (retryCount < MAX_RETRIES) {
