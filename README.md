@@ -17,7 +17,7 @@ Each ESP device handles packet reception and transmission in the mesh network. T
 | Role | File | Behavior |
 |------|------|----------|
 | **Sender** | `firmware/sender-node/sender-node.ino` | Packet injection schedule from LittleFS (`data/injection-schedule.json`): **FLASH** only, **periodic**, or **load-level** stochastic; then greedy first hop |
-| **Intermediate** | `firmware/intermediate-node/intermediate-node.ino` | Forwards packets, updates Q-table at each hop |
+| **Intermediate** | `firmware/intermediate-node/intermediate-node.ino` | Forwards packets to a direct mesh connection and returns Q-feedback |
 | **Receiver** | `firmware/receiver-node/receiver-node.ino` | Packet destination; receives and logs delivery |
 
 ```mermaid
@@ -33,8 +33,9 @@ sequenceDiagram
     Sender->>Intermediate: Send data + Q-learning data
 
     Note over Intermediate: Compute step_time from send_timestamp
-    Note over Intermediate: Update Q(node_from, us): ΔQ = η((q+s+t)−Q)
-    Note over Intermediate: Choose next hop (greedy, min Q)
+    Note over Intermediate: Choose next hop and estimate t from its local Q row
+    Intermediate-->>Sender: Q_FEEDBACK(t, step_time)
+    Note over Sender: Update its local Q(sender, intermediate)
     Intermediate->>Receiver: Forward PACKET_HOP
 
     Note over Receiver: Packet delivered
@@ -48,7 +49,29 @@ sequenceDiagram
     Note over Sender: Config: FLASH / periodic / load-level → inject
 ```
 
-**Forward-only flow:** No backward propagation. Q-updates happen at each hop when forwarding. Receiver does not broadcast. The sender’s **injection schedule** (LittleFS JSON) selects **PHYSICAL_BUTTON_DRIVEN** (FLASH on GPIO0), **PERIODIC** (one packet every `tick_ms`), or **LOAD_LEVEL** (expected `load_level` packets per `tick_ms`, stochastic rounding). If the file is missing or invalid, defaults match **PHYSICAL_BUTTON_DRIVEN**.
+**Local-learning flow:** Every node keeps its own Q row in RAM and chooses from that row. A receiver of a hop sends its local remaining-time estimate backward in a unicast `Q_FEEDBACK`; the previous node then updates the action it actually used. The sender’s **injection schedule** (LittleFS JSON) selects **PHYSICAL_BUTTON_DRIVEN** (FLASH on GPIO0), **PERIODIC** (one packet every `tick_ms`), or **LOAD_LEVEL** (expected `load_level` packets per `tick_ms`, stochastic rounding). If the file is missing or invalid, defaults match **PHYSICAL_BUTTON_DRIVEN**.
+
+### Direct neighbors and painlessMesh transport
+
+`mesh.getNodeList(false)` is the set of all known reachable nodes, including
+nodes reached through another mesh member. It is not an action set for
+Q-Routing. The firmware instead reads the first level of
+`mesh.asNodeTree().subs`. In painlessMesh 1.5.7 that tree level is constructed
+from the node's active `Mesh::subs` TCP connections; descendants are only
+indirectly reachable nodes.
+
+Every application-level Q hop is therefore sent to an active direct
+painlessMesh connection. `sendSingle()` is still the transport operation, but
+the selected target is first verified to be in that direct set, so a
+`PACKET_HOP` does not intentionally delegate an application hop to
+painlessMesh's multihop router. A direct painlessMesh TCP connection is the
+library-level link abstraction; the firmware does not claim independent RF
+neighbor discovery below that abstraction.
+
+The action set is rebuilt from the live topology for every decision. A
+disconnected ID remains in the RAM Q-table but cannot be selected. If it
+reconnects with the same ID, its learned value is reused. A genuinely new ID is
+initialized to `INITIAL_Q`.
 
 ![ezgif-7613d4d72bf73f91](https://github.com/user-attachments/assets/c13bcea1-a886-418f-82be-ad104d3cbdd7)
 
@@ -64,7 +87,7 @@ sequenceDiagram
 
 ### Update Rule (Boyan & Littman 1994)
 
-When a packet arrives from node `x` and we forward it, we update the link that was traversed:
+When a packet arrives from node `x`, the receiving node reports its estimate and `x` updates the link that was traversed:
 
 ```
 ΔQ_x(d,y) = η × ((q + s + t) - Q_x(d,y))
@@ -83,13 +106,14 @@ Where:
 ### Flow
 
 1. **Sender** sends a packet, picks first hop, sends `PACKET_HOP` with `send_timestamp`
-2. **Intermediate** receives, computes step_time from `send_timestamp`, updates Q(node_from, us), picks next hop, forwards
-3. **Receiver** receives; packet is delivered (no further action)
-4. **Sender** injects the next packet per its schedule (button, timer, or load level — no delivery callback)
+2. **Intermediate** receives, picks the next hop and computes `t` from its persistent local Q row, sends `Q_FEEDBACK` to the previous node, and forwards
+3. **Previous node** applies `Q_new = Q_old + eta * (step_time + t - Q_old)` once when the feedback arrives
+4. **Receiver** sends feedback with `t = 0`; the packet is delivered and is not forwarded
+5. **Sender** injects the next packet per its schedule (button, timer, or load level — no delivery callback)
 
 ## Message Structure
 
-Only **PACKET_HOP** messages are used. Structure:
+Routing uses **PACKET_HOP** plus the small backward **Q_FEEDBACK** message. `DELIVERY_DATA` keeps the delivered `PACKET_HOP` document shape for the host tools. Structure:
 
 ```json
 {
@@ -100,6 +124,7 @@ Only **PACKET_HOP** messages are used. Structure:
         "eta": 0.7
     },
     "current_packet_id": 1,
+    "hops_remaining": 23,
     "packets": [
         {
             "packet_id": 1,
@@ -120,8 +145,16 @@ Only **PACKET_HOP** messages are used. Structure:
 ```
 
 - **send_timestamp** (µs): Used by the receiver to compute actual transmission time
-- **q_table**: Q(from, to) = estimated delivery time; lower = better
-- **packets**: One object per injected packet; **packet_id** identifies it; **steps** list the hop path from sender toward the receiver
+- **q_table**: telemetry snapshot, wire-compatible with the existing tools. The sender seeds it from its local row; each visited node publishes its own local row, and the traversed entry records the update implied by the emitted feedback. It is not a routing input and never overwrites a node's local table.
+- **hops_remaining**: remaining application-level Q hops. It starts at
+  `MAX_Q_HOPS` (24 by default), is consumed before each send, and prevents a
+  greedy loop from circulating forever. It does not count internal radio/TCP
+  transmissions.
+- **packets**: exactly one object for the current packet; **packet_id**
+  identifies it and **steps** records only its hop path. Historical packet
+  records are not carried over the mesh. The sender advances the ID only after
+  painlessMesh accepts the first hop into its queue; immediate failed attempts
+  reuse the same ID.
 
 ## Setup
 
@@ -154,16 +187,17 @@ Then install the ESP8266 core:
 
 ```bash
 $ arduino-cli core update-index
-$ arduino-cli core install esp8266:esp8266
+$ arduino-cli core install esp8266:esp8266@3.1.2
 ```
 
 Install required libraries:
 
 ```bash
 $ arduino-cli lib update-index
-$ arduino-cli lib install "Painless Mesh"
-$ arduino-cli lib install ESPAsyncTCP
-$ arduino-cli lib install ArduinoJson
+$ arduino-cli lib install "Painless Mesh@1.5.7"
+$ arduino-cli lib install "ESPAsyncTCP@1.2.4"
+$ arduino-cli lib install "ArduinoJson@7.4.3"
+$ arduino-cli lib install "TaskScheduler@4.0.4"
 ```
 
 ## Detect the board
@@ -186,9 +220,9 @@ $ /dev/ttyUSB0 serial Serial Port (USB)
 For NodeMCU ESP8266, use:
 
 ```bash
-$ arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 ./firmware/sender-node
-$ arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 ./firmware/intermediate-node
-$ arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 ./firmware/receiver-node
+$ arduino-cli compile --library lib/QMeshCommon --fqbn esp8266:esp8266:nodemcuv2 ./firmware/sender-node
+$ arduino-cli compile --library lib/QMeshCommon --fqbn esp8266:esp8266:nodemcuv2 ./firmware/intermediate-node
+$ arduino-cli compile --library lib/QMeshCommon --fqbn esp8266:esp8266:nodemcuv2 ./firmware/receiver-node
 ```
 
 ### PlatformIO (optional)
@@ -221,10 +255,12 @@ $ arduino-cli upload -p /dev/ttyUSB0 --fqbn esp8266:esp8266:nodemcuv2 ./firmware
 
 To inspect logs from a node, use arduino-cli monitor.
 
-Example for baudrate 9600:
+Normal firmware logging omits full mesh JSON messages. The receiver retains the
+machine-readable `DELIVERY_DATA:<JSON>` stream. All three sketches use 115200
+baud:
 
 ```bash
-$ arduino-cli monitor -p /dev/ttyUSB0 -c baudrate=9600
+$ arduino-cli monitor -p /dev/ttyUSB0 -c baudrate=115200
 ```
 ## Network bring-up order
 
@@ -234,9 +270,20 @@ $ arduino-cli monitor -p /dev/ttyUSB0 -c baudrate=9600
 
 The sender injects packets per **`data/injection-schedule.json`** (e.g. FLASH, periodic, or load level); intermediate nodes forward packets and update Q-values; the receiver logs deliveries.
 
-**Important:** Routing is **one-shot** over the **current** painlessMesh neighbor graph. If you inject a packet **before** the receiver has joined Wi‑Fi mesh, **no node has the receiver as a neighbor yet**, so nothing can forward to it. Wait until all nodes show up in the mesh (or follow the order above), **then** inject. A new packet after the receiver is online will work; the old packet does not wait.
+**Important:** Routing is one-shot over the current direct-connection graph. If
+the graph is incomplete, a node with no direct action drops the packet; the old
+packet does not wait for reconnection. New packets use the updated topology.
+The receiver is identified by running the receiver firmware, not by a
+configured destination ID. Consequently it can disappear and rejoin without
+updating a stored destination, but its own RAM learning is lost on reboot. The
+design assumes one receiver role; multiple receiver-firmware nodes would all be
+terminal destinations.
 
-**Troubleshooting “receiver never sees the packet”:** (1) Confirm bring-up order — receiver on the mesh before injection. (2) Confirm the graph is connected (every node can reach every other via mesh hops). (3) If the serial log shows `Failed to parse message` on intermediates, the JSON may be too large — firmware uses an 8 KiB buffer for `PACKET_HOP` (`PACKET_JSON_CAPACITY`).
+**Troubleshooting “receiver never sees the packet”:** (1) Confirm the graph is
+connected by direct painlessMesh links. (2) Request a diagnostic snapshot and
+inspect each node's direct actions and drop counters. (3) Look for TTL,
+no-neighbor, invalid-JSON, and enqueue-exhaustion drops. `PACKET_HOP` is capped
+at 6144 serialized bytes and a 24-hop history.
 
 ### Visualization (optional)
 
@@ -264,6 +311,24 @@ Open http://localhost:5000 for the **Q-Routing Debugger** — a real-time dashbo
 The dashboard updates automatically via Server-Sent Events (SSE) — no browser refresh needed. A status bar shows live packet count, loop count, latest/average hops, max |dQ|, and SSE connection state.
 
 On restart, the server replays `received_data.log` to rebuild state, so no data is lost between sessions.
+
+### On-demand distributed diagnostics
+
+With the receiver connected over USB, pass `--diagnostics` to the middleware:
+
+```bash
+cd tools/learning-results-grabbing
+python middleware.py --diagnostics
+```
+
+The middleware writes `D` once after opening the serial port. The receiver
+broadcasts a `DIAG_REQUEST`; every node schedules a staggered response and sends
+a compact `DIAG_RESPONSE` to that receiver. Responses are printed as
+`DIAG_DATA:<JSON>`. Each includes the unsigned node ID, role, uptime, free heap,
+direct connections, reachable-node count, local Q row, and routing/drop/send/
+feedback counters. Diagnostics are not periodic and do not update Q-values.
+They do consume mesh bandwidth while the snapshot is collected, so request
+them between measurement bursts when timing isolation matters.
 
 ![Q-Routing Debugger](assets/server.png)
 
@@ -302,6 +367,29 @@ Per tick, load-level injection count is capped (firmware constant) to avoid floo
 | `INITIAL_Q` | 0.0 | Initial Q-value (lower = better) |
 | `FLASH_BUTTON_PIN` (sender) | `0` | NodeMCU FLASH → GPIO0; override if your board uses another pin (`#define` before compile) |
 | `FLASH_DEBOUNCE_MS` (sender) | `300` | Minimum time between injects on repeated edges (button mode) |
+| `MAX_Q_HOPS` | `24` | Maximum application Q hops before a looped packet is dropped |
+| `MAX_PACKET_JSON_SIZE` | `6144` | Maximum serialized mesh packet size accepted or emitted |
+| `MESH_SERIAL_BAUD` | `115200` | Firmware and middleware serial rate |
+| `VERBOSE_MESH_LOGS` | `0` | Set to 1 at compile time to print complete mesh messages (not recommended for timing experiments) |
+
+## Delivery and restart limitations
+
+- A successful `sendSingle()` means painlessMesh accepted the message into its
+  queue. It is not an end-to-end delivery acknowledgement. The bounded retries
+  only cover immediate enqueue or route rejection; a queued frame can still be
+  lost later.
+- There is no packet ACK/retransmission protocol and no feedback deduplication.
+  A lost `Q_FEEDBACK` loses that learning update; a duplicate feedback applies
+  the update again.
+- Q-tables are intentionally RAM-only. Other surviving nodes retain values for
+  a stable rejoining ID, while a rebooted node begins learning its own row
+  again.
+- ESP8266 painlessMesh IDs derive from the device network identity and normally
+  remain stable across ordinary reboots. All firmware and JSON paths treat IDs
+  as unsigned 32-bit decimal values.
+- Receiver discovery is role-based only in the sense that receiver firmware
+  terminates any `PACKET_HOP` that reaches it. There is no advertised receiver
+  ID or destination-specific Q-table dimension.
 
 ## References
 
