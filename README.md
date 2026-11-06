@@ -326,7 +326,10 @@ broadcasts a `DIAG_REQUEST`; every node schedules a staggered response and sends
 a compact `DIAG_RESPONSE` to that receiver. Responses are printed as
 `DIAG_DATA:<JSON>`. Each includes the unsigned node ID, role, uptime, free heap,
 direct connections, reachable-node count, local Q row, and routing/drop/send/
-feedback counters. Diagnostics are not periodic and do not update Q-values.
+feedback counters. It also reports whether that node knows a receiver identity;
+under the current role-based design only the receiver knows its own ID, while
+sender and intermediate responses report a null receiver ID. Diagnostics are
+not periodic and do not update Q-values.
 They do consume mesh bandwidth while the snapshot is collected, so request
 them between measurement bursts when timing isolation matters.
 

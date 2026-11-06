@@ -249,6 +249,8 @@ class FirmwareContractTests(unittest.TestCase):
             '"direct_neighbors"',
             '"known_nodes"',
             '"q_row"',
+            '"receiver_identity_known"',
+            '"receiver_id"',
             '"drop_ttl"',
             '"send_enqueue_failures"',
             '"feedback_applied"',

@@ -116,6 +116,13 @@ inline void buildDiagnosticResponse(TDocument &doc, painlessMesh &mesh,
   doc["request_id"] = requestId;
   doc["node_id"] = nodeIdKey(nodeId);
   doc["role"] = role;
+  bool receiverIdentityKnown = strcmp(role, "RECEIVER") == 0;
+  doc["receiver_identity_known"] = receiverIdentityKnown;
+  if (receiverIdentityKnown) {
+    doc["receiver_id"] = nodeIdKey(nodeId);
+  } else {
+    doc["receiver_id"] = nullptr;
+  }
   doc["uptime_ms"] = millis();
   doc["free_heap"] = ESP.getFreeHeap();
   doc["known_nodes"] = mesh.getNodeList(false).size();
