@@ -56,6 +56,15 @@ def direct_neighbors(topology):
     return [connection["node_id"] for connection in topology["subs"]]
 
 
+def make_packet(packet_id, max_hops=24):
+    return {
+        "type": "PACKET_HOP",
+        "current_packet_id": packet_id,
+        "hops_remaining": max_hops,
+        "packets": [{"packet_id": packet_id, "steps": []}],
+    }
+
+
 class LocalQRoutingBehaviorTests(unittest.TestCase):
     def test_only_first_level_topology_nodes_are_actions(self):
         topology = {
@@ -81,6 +90,21 @@ class LocalQRoutingBehaviorTests(unittest.TestCase):
         self.assertGreater(node_id, 2**31 - 1)
         self.assertEqual(str(node_id), "4208810825")
         self.assertNotEqual(str(node_id), "-86156471")
+
+    def test_packet_creation_contains_only_current_packet(self):
+        first = make_packet(1)
+        second = make_packet(2)
+        self.assertEqual(first["packets"], [{"packet_id": 1, "steps": []}])
+        self.assertEqual(second["packets"], [{"packet_id": 2, "steps": []}])
+
+    def test_packet_ttl_exhaustion_is_bounded(self):
+        packet = make_packet(1, max_hops=2)
+        forwarded = 0
+        while packet["hops_remaining"] > 0:
+            packet["hops_remaining"] -= 1
+            forwarded += 1
+        self.assertEqual(forwarded, 2)
+        self.assertEqual(packet["hops_remaining"], 0)
 
     def test_feedback_persists_and_packet_telemetry_cannot_override_it(self):
         b = NodeModel("B")
@@ -147,6 +171,8 @@ class FirmwareContractTests(unittest.TestCase):
             self.assertEqual(len(assignment.findall(source)), 1)
             body = function_body(source, "void handleQFeedback(")
             self.assertIn("fromNodeId != g_nodeId", body)
+            self.assertIn("viaNodeId != transport_from", body)
+            self.assertIn("isDirectMeshNeighbor(mesh, transport_from)", body)
             self.assertIn("time_in_queue = 0.0f", body)
             self.assertIn("old_q + g_eta * (target - old_q)", body)
 
@@ -178,6 +204,64 @@ class FirmwareContractTests(unittest.TestCase):
             self.assertNotIn("std::vector<int> getNeighbors", source)
             self.assertNotIn(".toInt()", source)
         self.assertIn("using NodeId = uint32_t", COMMON)
+        self.assertIn("UINT32_MAX", COMMON)
+        self.assertNotIn("strtoul", COMMON)
+
+    def test_sender_does_not_persist_packet_history(self):
+        self.assertNotIn("g_packets", SENDER)
+        body = function_body(SENDER, "void buildMessage(")
+        self.assertIn('doc.createNestedArray("packets")', body)
+        self.assertIn('doc["hops_remaining"] = MAX_Q_HOPS', body)
+
+    def test_intermediate_checks_forwarding_result(self):
+        body = function_body(INTERMEDIATE, "void processPacket(")
+        self.assertIn("if (prepareAndSendMessage(doc, next_action))", body)
+        self.assertIn("g_diagnostics.packets_dropped++", body)
+
+    def test_retry_loop_does_not_block_mesh_updates_with_delay(self):
+        for source in (SENDER, INTERMEDIATE, RECEIVER):
+            body = function_body(source, "bool sendMessageWithRetries(")
+            self.assertNotIn("delay(", body)
+            self.assertIn("retry_exhausted", body)
+            self.assertIn("isDirectMeshNeighbor(mesh, next_hop)", body)
+
+    def test_routing_messages_require_direct_transport(self):
+        for source in (SENDER, INTERMEDIATE):
+            forward = function_body(source, "bool prepareAndSendMessage(")
+            self.assertIn("updatedJsonString, true", forward)
+        for source in (SENDER, INTERMEDIATE, RECEIVER):
+            feedback = function_body(source, "void sendQFeedback(")
+            self.assertIn("feedbackStr, true", feedback)
+
+    def test_packet_validation_and_size_limit_are_shared(self):
+        self.assertIn("validatePacketDocument", COMMON)
+        self.assertIn("MAX_PACKET_JSON_SIZE", COMMON)
+        self.assertIn("steps.size() <= MAX_Q_HOPS", COMMON)
+
+    def test_diagnostic_request_and_response_contract(self):
+        all_sources = SENDER + INTERMEDIATE + RECEIVER
+        self.assertIn('"DIAG_REQUEST"', all_sources)
+        self.assertIn('"DIAG_RESPONSE"', all_sources)
+        self.assertIn('"DIAG_DATA:"', RECEIVER)
+        self.assertIn("PendingDiagnosticResponse", COMMON)
+        self.assertIn("DiagnosticRequestHistory", COMMON)
+        for field in (
+            '"direct_neighbors"',
+            '"known_nodes"',
+            '"q_row"',
+            '"drop_ttl"',
+            '"send_enqueue_failures"',
+            '"feedback_applied"',
+        ):
+            self.assertIn(field, COMMON)
+
+    def test_diagnostics_are_on_demand_and_staggered(self):
+        for source in (SENDER, INTERMEDIATE, RECEIVER):
+            schedule = function_body(source, "void scheduleDiagnosticResponse(")
+            self.assertIn("g_nodeId % 750", schedule)
+            process = function_body(source, "void processPendingDiagnosticResponse(")
+            self.assertIn("g_pendingDiagnostic.pending", process)
+        self.assertIn("Serial.read() == 'D'", RECEIVER)
 
 
 if __name__ == "__main__":

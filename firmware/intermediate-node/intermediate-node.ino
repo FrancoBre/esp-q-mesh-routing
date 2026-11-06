@@ -41,8 +41,7 @@
   Serial.print(" - ");                       \
   Serial.print(__FUNCTION__);                \
   Serial.print("] ");                        \
-  Serial.println(msg);                       \
-  Serial.flush();
+  Serial.println(msg);
 
 #define MESH_PREFIX "ESP_Q_MESH_ROUTING"
 #define MESH_PASSWORD "ESP_Q_MESH_ROUTING"
@@ -54,12 +53,12 @@
 #endif
 
 // Constants and Hyperparameters
-const int MAX_RETRIES = 10;
+const int MAX_RETRIES = 3;
 const float STEP_TIME = 1.0f;      // Fallback when send_timestamp missing
 const float INITIAL_Q = 0.0f;
 float g_eta = 0.7f;               // Learning rate
 
-enum MessageType { PACKET_HOP, Q_FEEDBACK, UNKNOWN };
+enum MessageType { PACKET_HOP, Q_FEEDBACK, DIAG_REQUEST, DIAG_RESPONSE, UNKNOWN };
 
 enum NodeState { PROCESSING_PACKET, EXPLOITATION_PHASE };
 
@@ -68,6 +67,9 @@ NodeState g_nodeState = PROCESSING_PACKET;
 StaticJsonDocument<8192> g_persistentDoc;
 JsonObject g_qTable = g_persistentDoc.createNestedObject("q_table");
 NodeId g_nodeId = 0;
+DiagnosticCounters g_diagnostics;
+PendingDiagnosticResponse g_pendingDiagnostic;
+DiagnosticRequestHistory g_diagnosticRequestHistory;
 
 // Objects declarations
 Scheduler userScheduler;
@@ -81,14 +83,15 @@ void handlePacketHop(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
 MessageType getMessageType(const String &typeStr);
 std::vector<NodeId> getNeighbors();
 NodeId chooseBestAction(const std::vector<NodeId> &neighbors);
-bool sendMessageWithRetries(NodeId next_hop, String &msg);
+bool sendMessageWithRetries(NodeId next_hop, String &msg,
+                            bool direct_only = false);
 unsigned long getSyncedTimeInMs();
 void extractHyperparameters(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
 void createNewHop(JsonObject &packetRecord, const String &node_from,
                   const String &next_action);
 bool prepareAndSendMessage(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc,
                            NodeId next_action);
-JsonObject findPacketById(JsonArray &packets, int current_packet_id);
+JsonObject findPacketById(JsonArray &packets, uint32_t current_packet_id);
 void processPacket(JsonObject &packetRecord, StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
 float estimateRemainingTime(const std::vector<NodeId> &neighbors);
 void updatePacketQTable(const String &node_from,
@@ -97,16 +100,18 @@ void updatePacketQTable(const String &node_from,
                         float step_time,
                         float t,
                         StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
-void initializeOrUpdateQTable(JsonObject &q_table);
 void initializeLocalActions(const std::vector<NodeId> &neighbors);
 void copyLocalActionsToPacket(JsonObject q_table);
-void handleQFeedback(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc);
+void handleQFeedback(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc,
+                     NodeId transport_from);
 void sendQFeedback(NodeId to_node, NodeId via_node,
                    float estimate_t, float step_time);
+void scheduleDiagnosticResponse(JsonDocument &doc);
+void processPendingDiagnosticResponse();
 
 // Main logic functions
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(MESH_SERIAL_BAUD);
 
   for (uint8_t t = 10; t > 0; t--) {
     LOG("WAIT " + String(t) + "...");
@@ -123,11 +128,23 @@ void setup() {
   LOG("Mesh initialized successfully");
 }
 
-void loop() { mesh.update(); }
+void loop() {
+  mesh.update();
+  processPendingDiagnosticResponse();
+}
 
 // Messaging
 void receivedCallback(uint32_t from, String &msg) {
+#if VERBOSE_MESH_LOGS
   LOG("Received message from " + String(from) + ": " + msg);
+#endif
+
+
+  if (msg.length() > MAX_PACKET_JSON_SIZE) {
+    LOG("Dropping oversized mesh message");
+    g_diagnostics.drop_json++;
+    return;
+  }
 
   StaticJsonDocument<PACKET_JSON_CAPACITY> doc;
   DeserializationError error = deserializeJson(doc, msg);
@@ -135,23 +152,42 @@ void receivedCallback(uint32_t from, String &msg) {
   if (error) {
     LOG("Failed to parse message: ");
     Serial.println(error.c_str());
+    g_diagnostics.drop_json++;
     return;
   }
 
   MessageType msgType = getMessageType(doc["type"]);
   if (msgType == PACKET_HOP) {
+    NodeId claimedSender = 0;
+    if (!parseNodeId(doc["current_node_id"], claimedSender) ||
+        claimedSender != from || !isDirectMeshNeighbor(mesh, claimedSender)) {
+      LOG("Dropping PACKET_HOP not received from a direct Q neighbor");
+      g_diagnostics.packets_dropped++;
+      g_diagnostics.drop_invalid_packet++;
+      return;
+    }
     handlePacketHop(doc);
   } else if (msgType == Q_FEEDBACK) {
-    handleQFeedback(doc);
+    handleQFeedback(doc, from);
+  } else if (msgType == DIAG_REQUEST) {
+    scheduleDiagnosticResponse(doc);
   }
 }
 
 void handlePacketHop(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
   LOG("Processing PACKET_HOP");
+  g_diagnostics.packets_received++;
+
+  if (!validatePacketDocument(doc)) {
+    LOG("Dropping invalid PACKET_HOP");
+    g_diagnostics.packets_dropped++;
+    g_diagnostics.drop_invalid_packet++;
+    return;
+  }
 
   extractHyperparameters(doc);
 
-  int current_packet_id = doc["current_packet_id"];
+  uint32_t current_packet_id = doc["current_packet_id"];
 
   JsonArray receivedPackets = doc["packets"];
   JsonObject packetRecord = findPacketById(receivedPackets, current_packet_id);
@@ -161,23 +197,39 @@ void handlePacketHop(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
   } else {
     LOG("No matching packet for current_packet_id: " +
         String(current_packet_id));
+    g_diagnostics.packets_dropped++;
+    g_diagnostics.drop_invalid_packet++;
   }
 }
 
 void processPacket(JsonObject &packetRecord, StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
   JsonObject q_table = doc["q_table"];
-  initializeOrUpdateQTable(q_table);
 
   String node_from = doc["current_node_id"];
   String node_to = nodeIdKey(g_nodeId);
+  createNewHop(packetRecord, node_from, node_to);
+
+  if (doc["hops_remaining"].as<uint32_t>() == 0) {
+    LOG("Dropping packet: Q-hop limit reached");
+    g_diagnostics.packets_dropped++;
+    g_diagnostics.drop_ttl++;
+    return;
+  }
 
   std::vector<NodeId> neighbors = getNeighbors();
-  if (neighbors.empty()) return;
+  if (neighbors.empty()) {
+    LOG("Dropping packet: no direct neighbors");
+    g_diagnostics.packets_dropped++;
+    g_diagnostics.drop_no_neighbor++;
+    return;
+  }
   initializeLocalActions(neighbors);
   copyLocalActionsToPacket(q_table);
 
   NodeId next_action = chooseBestAction(neighbors);
   if (next_action == 0) {
+    g_diagnostics.packets_dropped++;
+    g_diagnostics.drop_no_neighbor++;
     return;
   }
 
@@ -202,10 +254,18 @@ void processPacket(JsonObject &packetRecord, StaticJsonDocument<PACKET_JSON_CAPA
     sendQFeedback(previousNode, g_nodeId, t, step_time);
   }
 
-  createNewHop(packetRecord, node_from, node_to);
-
   doc["type"] = "PACKET_HOP";
-  prepareAndSendMessage(doc, next_action);
+  if (!consumeHopBudget(doc)) {
+    g_diagnostics.packets_dropped++;
+    g_diagnostics.drop_ttl++;
+    return;
+  }
+  if (prepareAndSendMessage(doc, next_action)) {
+    g_diagnostics.packets_forwarded++;
+  } else {
+    LOG("Dropping packet: failed to queue forward");
+    g_diagnostics.packets_dropped++;
+  }
 }
 
 // Hyperparameters
@@ -217,7 +277,7 @@ void extractHyperparameters(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
   }
 }
 
-JsonObject findPacketById(JsonArray &packets, int current_packet_id) {
+JsonObject findPacketById(JsonArray &packets, uint32_t current_packet_id) {
   for (JsonObject packetRecord : packets) {
     if (packetRecord["packet_id"] == current_packet_id) {
       return packetRecord;
@@ -244,9 +304,12 @@ bool prepareAndSendMessage(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc,
   doc["current_node_id"] = nodeIdKey(g_nodeId);
   doc["send_timestamp"] = mesh.getNodeTime();  // For next hop to compute step_time
   String updatedJsonString;
-  serializeJson(doc, updatedJsonString);
+  if (!serializePacketDocument(doc, updatedJsonString)) {
+    g_diagnostics.drop_json++;
+    return false;
+  }
 
-  return sendMessageWithRetries(next_action, updatedJsonString);
+  return sendMessageWithRetries(next_action, updatedJsonString, true);
 }
 
 // Telemetry mirror of the Q-Routing update that Q_FEEDBACK applies at
@@ -259,7 +322,6 @@ void updatePacketQTable(const String &node_from,
                         StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
   JsonObject q_table = doc["q_table"];
 
-  initializeOrUpdateQTable(q_table);
   ensureStateExists(q_table, node_from, node_to);
 
   float old_q = q_table[node_from][node_to].as<float>();
@@ -317,35 +379,46 @@ void copyLocalActionsToPacket(JsonObject q_table) {
   }
 }
 
-// Merge current mesh membership into the packet's q_table (same as sender).
-void initializeOrUpdateQTable(JsonObject &q_table) {
-  auto nodes = mesh.getNodeList(true);
-
-  for (auto &&id : nodes) {
-    String node_from = String(id);
-    for (auto &&id_2 : nodes) {
-      String node_to = String(id_2);
-
-      if (id_2 != id) {
-        if (!q_table.containsKey(node_from)) {
-          q_table.createNestedObject(node_from);
-          LOG("Initializing state_from: " + node_from);
-        }
-
-        if (!q_table[node_from].containsKey(node_to)) {
-          q_table[node_from][node_to] = INITIAL_Q;
-          LOG("Initializing state_to: " + node_to +
-              " for state_from: " + node_from);
-        }
-      }
-    }
-  }
-}
-
 MessageType getMessageType(const String &typeStr) {
   if (typeStr == "PACKET_HOP") return PACKET_HOP;
   if (typeStr == "Q_FEEDBACK") return Q_FEEDBACK;
+  if (typeStr == "DIAG_REQUEST") return DIAG_REQUEST;
+  if (typeStr == "DIAG_RESPONSE") return DIAG_RESPONSE;
   return UNKNOWN;
+}
+
+void scheduleDiagnosticResponse(JsonDocument &doc) {
+  NodeId collector = 0;
+  uint32_t requestId = doc["request_id"] | 0;
+  if (!parseNodeId(doc["collector_id"], collector) ||
+      !g_diagnosticRequestHistory.accept(requestId)) {
+    return;
+  }
+  g_pendingDiagnostic.pending = true;
+  g_pendingDiagnostic.request_id = requestId;
+  g_pendingDiagnostic.collector_id = collector;
+  g_pendingDiagnostic.send_at_ms = millis() + 50 + (g_nodeId % 750);
+}
+
+void processPendingDiagnosticResponse() {
+  if (!g_pendingDiagnostic.pending ||
+      !timeReached(millis(), g_pendingDiagnostic.send_at_ms)) {
+    return;
+  }
+  g_pendingDiagnostic.pending = false;
+
+  StaticJsonDocument<2048> doc;
+  JsonObject localActions = g_qTable[nodeIdKey(g_nodeId)];
+  buildDiagnosticResponse(doc, mesh, g_nodeId, "INTERMEDIATE", localActions,
+                          g_diagnostics, g_pendingDiagnostic.request_id);
+  String message;
+  if (!serializePacketDocument(doc, message)) {
+    g_diagnostics.drop_json++;
+    return;
+  }
+  if (!sendMessageWithRetries(g_pendingDiagnostic.collector_id, message)) {
+    LOG("Failed to queue DIAG_RESPONSE");
+  }
 }
 
 void ensureStateExists(JsonObject &q_table, const String &state_from,
@@ -367,6 +440,11 @@ std::vector<NodeId> getNeighbors() {
 NodeId chooseBestAction(const std::vector<NodeId> &neighbors) {
   initializeLocalActions(neighbors);
   JsonObject actions = g_qTable[nodeIdKey(g_nodeId)];
+  if (g_persistentDoc.overflowed() || actions.isNull()) {
+    LOG("Local Q-table allocation failed");
+    g_diagnostics.drop_json++;
+    return 0;
+  }
   float best_value = 999999.0f;  // Start high, we want minimum
   NodeId best_action = 0;
 
@@ -386,18 +464,22 @@ NodeId chooseBestAction(const std::vector<NodeId> &neighbors) {
   return best_action;
 }
 
-// Retry logic
-bool sendMessageWithRetries(NodeId next_hop, String &msg) {
+// Bounded retries cover immediate route/enqueue rejection only. A true return
+// means queued by painlessMesh, not confirmed delivery.
+bool sendMessageWithRetries(NodeId next_hop, String &msg, bool direct_only) {
   int retryCount = 0;
 
   while (retryCount < MAX_RETRIES) {
+    if (direct_only && !isDirectMeshNeighbor(mesh, next_hop)) return false;
     if (mesh.sendSingle(next_hop, msg)) {
       return true;
     }
+    g_diagnostics.send_enqueue_failures++;
     retryCount++;
-    delay(100);
+    yield();
   }
 
+  g_diagnostics.retry_exhausted++;
   return false;
 }
 
@@ -410,7 +492,13 @@ unsigned long getSyncedTimeInMs() {
   return scaledTimeMilliseconds;
 }
 
-void handleQFeedback(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
+void handleQFeedback(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc,
+                     NodeId transport_from) {
+  g_diagnostics.feedback_received++;
+  if (!doc["estimate_t"].is<float>() || !doc["step_time"].is<float>()) {
+    LOG("Ignoring malformed Q_FEEDBACK");
+    return;
+  }
   NodeId fromNodeId = 0;
   NodeId viaNodeId = 0;
   if (!parseNodeId(doc["from_node"], fromNodeId) ||
@@ -428,6 +516,11 @@ void handleQFeedback(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
     LOG("Ignoring Q_FEEDBACK addressed to " + from_node);
     return;
   }
+  if (viaNodeId != transport_from ||
+      !isDirectMeshNeighbor(mesh, transport_from)) {
+    LOG("Ignoring Q_FEEDBACK not received from the direct via node");
+    return;
+  }
 
   if (!g_qTable.containsKey(from_node)) {
     g_qTable.createNestedObject(from_node);
@@ -440,6 +533,12 @@ void handleQFeedback(StaticJsonDocument<PACKET_JSON_CAPACITY> &doc) {
   float target = time_in_queue + step_time + estimate_t;
   float new_q = old_q + g_eta * (target - old_q);
   g_qTable[from_node][via_node] = new_q;
+  if (g_persistentDoc.overflowed()) {
+    LOG("Local Q-table allocation failed");
+    g_diagnostics.drop_json++;
+    return;
+  }
+  g_diagnostics.feedback_applied++;
 
   LOG("Q_FEEDBACK applied [from=" + from_node + " via=" + via_node +
       "] old=" + String(old_q) + " t=" + String(estimate_t) +
@@ -456,9 +555,12 @@ void sendQFeedback(NodeId to_node, NodeId via_node,
   feedbackDoc["step_time"] = step_time;
 
   String feedbackStr;
-  serializeJson(feedbackDoc, feedbackStr);
+  if (!serializePacketDocument(feedbackDoc, feedbackStr)) {
+    g_diagnostics.drop_json++;
+    return;
+  }
 
-  if (sendMessageWithRetries(to_node, feedbackStr)) {
+  if (sendMessageWithRetries(to_node, feedbackStr, true)) {
     LOG("Q_FEEDBACK queued to " + nodeIdKey(to_node) + " (via=" +
         nodeIdKey(via_node) +
         " t=" + String(estimate_t) + " s=" + String(step_time) + ")");
