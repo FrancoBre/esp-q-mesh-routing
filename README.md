@@ -314,8 +314,7 @@ On restart, the server replays `received_data.log` to rebuild state, so no data 
 
 ### Start a fresh experiment
 
-Stop both the middleware and visualization server, then clear their generated
-history from the repository root:
+Stop the middleware, then clear the generated history from the repository root:
 
 ```bash
 tools/reset-experiment.sh
@@ -327,9 +326,10 @@ To inspect the affected files without changing them:
 tools/reset-experiment.sh --dry-run
 ```
 
-The command truncates only `learning_results_log.txt` and `received_data.log`.
-Restart the visualization server afterward so its in-memory graph state also
-starts empty.
+The command truncates only the middleware and visualization experiment logs.
+If the visualization server is running, its localhost-only reset endpoint also
+clears the in-memory graph and reloads connected dashboards. A stopped or older
+server must be restarted before beginning the next experiment.
 
 ### On-demand distributed diagnostics
 

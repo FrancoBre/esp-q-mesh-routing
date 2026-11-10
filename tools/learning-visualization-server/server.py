@@ -6,10 +6,12 @@ of learning dynamics: topology, Q-values, hop counts, convergence, loops.
 import json
 import time
 import queue
+import threading
+from pathlib import Path
 
 from flask import Flask, request, Response, jsonify, render_template_string
 
-LOG_FILE = 'received_data.log'
+LOG_FILE = Path(__file__).resolve().parent / 'received_data.log'
 
 app = Flask(__name__)
 
@@ -165,6 +167,7 @@ class SessionState:
 
 # Global state
 state = SessionState()
+state_lock = threading.RLock()
 sse_listeners = []  # list of queue.Queue, one per connected browser
 
 
@@ -227,26 +230,27 @@ def receive_data():
     received = request.json
     timestamp = time.time()
 
-    packet_record = state.ingest_event(received, timestamp)
+    with state_lock:
+        packet_record = state.ingest_event(received, timestamp)
 
-    with open(LOG_FILE, 'a') as f:
-        json.dump(received, f)
-        f.write('\n')
+        with open(LOG_FILE, 'a') as f:
+            json.dump(received, f)
+            f.write('\n')
 
-    # Push SSE update (delta only)
-    sse_data = {
-        'type': 'new_event',
-        'event_index': len(state.events) - 1,
-        'packet': packet_record,
-        'q_table': state.get_latest_q_table(),
-        'q_delta': state.q_deltas[-1] if state.q_deltas else 0,
-        'hop_counts': state.hop_counts,
-        'rolling_avg_hops': state.rolling_avg_hops,
-        'node_labels': state.node_labels,
-        'nodes': sorted(state.nodes),
-        'total_packets': len(state.packets),
-        'loop_count': state.loop_count,
-    }
+        # Push SSE update (delta only)
+        sse_data = {
+            'type': 'new_event',
+            'event_index': len(state.events) - 1,
+            'packet': packet_record,
+            'q_table': state.get_latest_q_table(),
+            'q_delta': state.q_deltas[-1] if state.q_deltas else 0,
+            'hop_counts': state.hop_counts,
+            'rolling_avg_hops': state.rolling_avg_hops,
+            'node_labels': state.node_labels,
+            'nodes': sorted(state.nodes),
+            'total_packets': len(state.packets),
+            'loop_count': state.loop_count,
+        }
     notify_listeners(sse_data)
 
     pid = packet_record['packet_id'] if packet_record else '?'
@@ -258,7 +262,23 @@ def receive_data():
 
 @app.route('/api/state')
 def api_state():
-    return jsonify(state.to_api_state())
+    with state_lock:
+        return jsonify(state.to_api_state())
+
+
+@app.route('/api/reset', methods=['POST'])
+def api_reset():
+    """Clear persisted and in-memory experiment state from localhost only."""
+    if request.remote_addr not in {'127.0.0.1', '::1'}:
+        return jsonify({'error': 'reset is restricted to localhost'}), 403
+
+    global state
+    with state_lock:
+        state = SessionState()
+        LOG_FILE.write_text('')
+
+    notify_listeners({'type': 'reset'})
+    return jsonify({'status': 'reset'})
 
 
 @app.route('/api/stream')
@@ -400,6 +420,10 @@ function connectSSE() {
     };
     es.onmessage = (e) => {
         const d = JSON.parse(e.data);
+        if (d.type === 'reset') {
+            window.location.reload();
+            return;
+        }
         // Update state incrementally
         S.nodes = d.nodes || S.nodes;
         S.node_labels = d.node_labels || S.node_labels;

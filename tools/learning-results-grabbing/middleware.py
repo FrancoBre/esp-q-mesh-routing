@@ -7,6 +7,7 @@ Q-routing (Boyan & Littman 1993).
 import argparse
 import json
 import time
+from pathlib import Path
 
 import requests
 import serial
@@ -15,7 +16,7 @@ from serial.tools import list_ports
 serial_port = '/dev/ttyUSB0'
 baud_rate = 115200
 server_url = 'http://localhost:5000/data'
-log_file_path = 'learning_results_log.txt'
+log_file_path = Path(__file__).resolve().parent / 'learning_results_log.txt'
 DELIVERY_MARKER = 'DELIVERY_DATA:'
 
 
