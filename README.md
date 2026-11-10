@@ -312,6 +312,25 @@ The dashboard updates automatically via Server-Sent Events (SSE) — no browser 
 
 On restart, the server replays `received_data.log` to rebuild state, so no data is lost between sessions.
 
+### Start a fresh experiment
+
+Stop both the middleware and visualization server, then clear their generated
+history from the repository root:
+
+```bash
+tools/reset-experiment.sh
+```
+
+To inspect the affected files without changing them:
+
+```bash
+tools/reset-experiment.sh --dry-run
+```
+
+The command truncates only `learning_results_log.txt` and `received_data.log`.
+Restart the visualization server afterward so its in-memory graph state also
+starts empty.
+
 ### On-demand distributed diagnostics
 
 With the receiver connected over USB, pass `--diagnostics` to the middleware:
