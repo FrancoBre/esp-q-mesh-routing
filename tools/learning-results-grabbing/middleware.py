@@ -7,14 +7,16 @@ Q-routing (Boyan & Littman 1993).
 import argparse
 import json
 import time
+from pathlib import Path
 
 import requests
 import serial
+from serial.tools import list_ports
 
 serial_port = '/dev/ttyUSB0'
-baud_rate = 9600
+baud_rate = 115200
 server_url = 'http://localhost:5000/data'
-log_file_path = 'learning_results_log.txt'
+log_file_path = Path(__file__).resolve().parent / 'learning_results_log.txt'
 DELIVERY_MARKER = 'DELIVERY_DATA:'
 
 
@@ -23,8 +25,8 @@ def parse_args():
         description="Q-routing ESP middleware: Serial → visualization server"
     )
     parser.add_argument(
-        '--port', default=serial_port,
-        help=f"Serial port (default: {serial_port})"
+        '--port',
+        help="Serial port. If omitted, prompt at startup."
     )
     parser.add_argument(
         '--server', default=server_url,
@@ -34,7 +36,56 @@ def parse_args():
         '--verbose', action='store_true',
         help="Enable detailed logging"
     )
+    parser.add_argument(
+        '--diagnostics', action='store_true',
+        help="Request one distributed diagnostic snapshot after connecting"
+    )
     return parser.parse_args()
+
+
+def choose_serial_port():
+    """Prompt the user to select a detected serial port or enter one manually."""
+    detected_ports = sorted(port.device for port in list_ports.comports())
+
+    if not detected_ports:
+        try:
+            selected = input(
+                f"No serial ports detected. Enter a port [{serial_port}]: "
+            ).strip()
+        except EOFError:
+            selected = ''
+        return selected or serial_port
+
+    print("Available serial ports:")
+    for index, port in enumerate(detected_ports, start=1):
+        print(f"  {index}) {port}")
+    print(f"  {len(detected_ports) + 1}) Enter a port manually")
+
+    while True:
+        try:
+            choice = input("Select a port [1]: ").strip()
+        except EOFError:
+            choice = ''
+
+        if not choice:
+            return detected_ports[0]
+
+        try:
+            selected_index = int(choice) - 1
+        except ValueError:
+            print("Please enter one of the listed numbers.")
+            continue
+
+        if 0 <= selected_index < len(detected_ports):
+            return detected_ports[selected_index]
+        if selected_index == len(detected_ports):
+            manual_port = input("Serial port: ").strip()
+            if manual_port:
+                return manual_port
+            print("Port cannot be empty.")
+            continue
+
+        print("Please enter one of the listed numbers.")
 
 
 def open_serial_port(port, baud):
@@ -91,8 +142,12 @@ def log_to_file(line):
 def main():
     args = parse_args()
     verbose = args.verbose
+    port = args.port or choose_serial_port()
 
-    ser = open_serial_port(args.port, baud_rate)
+    ser = open_serial_port(port, baud_rate)
+    if args.diagnostics:
+        ser.write(b'D\n')
+        ser.flush()
 
     while True:
         if ser.in_waiting > 0:
@@ -114,7 +169,7 @@ def main():
 
         if not ser.is_open:
             print("Serial disconnected. Reconnecting...")
-            ser = open_serial_port(args.port, baud_rate)
+            ser = open_serial_port(port, baud_rate)
 
 
 if __name__ == '__main__':
